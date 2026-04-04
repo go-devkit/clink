@@ -55,7 +55,7 @@ func tryCLI(ctx context.Context, newCLI func() *cli.Command) func(next ssh.Handl
 			propagateWriter(s, cmd)
 
 			if sub := cmd.Command(command[0]); sub != nil {
-				command = append([]string{"locai"}, command...)
+				command = append([]string{cmd.Name}, command...)
 				if err := cmd.Run(ctx, command); err != nil {
 					fmt.Fprintf(s.Stderr(), "%v\n", err)
 
