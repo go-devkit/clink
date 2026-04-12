@@ -38,7 +38,7 @@ type Handler func(ctx context.Context, s Session, args []string) error
 var ErrNotHandled = errors.New("command not handled")
 
 // Listen starts the daemon and handles incoming CLI commands and TUI sessions.
-// If newTUI is nil, connections without a command are closed immediately.
+// If newTUI is nil, connections without a command are closed.
 func Listen(
 	ctx context.Context, conf Config,
 	handler Handler, newTUI func() (tea.Model, []tea.ProgramOption),
