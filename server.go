@@ -54,7 +54,14 @@ func Serve(
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		return s.Shutdown(context.Background())
+		shutdownErr := s.Shutdown(context.Background())
+		if err := <-errCh; err != nil && !errors.Is(err, ssh.ErrServerClosed) {
+			return err
+		}
+		if shutdownErr != nil {
+			return shutdownErr
+		}
+		return ctx.Err()
 	}
 }
 
