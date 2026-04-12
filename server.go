@@ -61,7 +61,7 @@ func Serve(
 		if shutdownErr != nil {
 			return shutdownErr
 		}
-		return ctx.Err()
+		return nil
 	}
 }
 
