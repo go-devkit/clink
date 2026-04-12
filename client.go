@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -12,7 +11,7 @@ import (
 )
 
 // Dial connects to a remote SSH server and forwards the given args as a command.
-// If args has no elements beyond the program name, it requests a PTY and launches the TUI.
+// If args is empty, it requests a PTY and launches the TUI.
 func Dial(host, port, password string, args []string) error {
 	config := &ssh.ClientConfig{
 		User: "user",
@@ -34,22 +33,16 @@ func Dial(host, port, password string, args []string) error {
 	}
 	defer session.Close()
 
-	// Execute command - skip program name but include the actual command
-	if len(args) > 1 {
+	if len(args) > 0 {
 		session.Stdin = os.Stdin
 		session.Stdout = os.Stdout
 		session.Stderr = os.Stderr
 
-		quotedArgs := make([]string, len(args)-1)
-		for i, arg := range args[1:] {
-			if strings.ContainsAny(arg, " \t\n") {
-				quotedArgs[i] = strconv.Quote(arg)
-			} else {
-				quotedArgs[i] = arg
-			}
+		quoted := make([]string, len(args))
+		for i, arg := range args {
+			quoted[i] = shellQuote(arg)
 		}
-		remoteCmd := strings.Join(quotedArgs, " ")
-		return session.Run(remoteCmd)
+		return session.Run(strings.Join(quoted, " "))
 	}
 
 	// For interactive/TUI mode, set up terminal and PTY
@@ -88,4 +81,10 @@ func Dial(host, port, password string, args []string) error {
 	}
 
 	return session.Run("tui")
+}
+
+// shellQuote quotes a string using POSIX single-quote escaping,
+// safe for parsing by go-shlex on the server side.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }

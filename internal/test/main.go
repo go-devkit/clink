@@ -25,7 +25,7 @@ func main() {
 			port := strconv.Itoa(cmd.Int("port"))
 			password := cmd.String("password")
 
-			if err := cligate.Dial(host, port, password, os.Args); err != nil {
+			if err := cligate.Dial(host, port, password, cmd.Args().Slice()); err != nil {
 				return ctx, fmt.Errorf("server connection failed: %w", err)
 			}
 

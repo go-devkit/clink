@@ -7,7 +7,8 @@ Forward CLI commands and [BubbleTea](https://github.com/charmbracelet/bubbletea)
 ## Core API
 
 ```go
-// Client: forward command-line args to a remote SSH server.
+// Client: forward args to a remote SSH server.
+// If args is empty, opens an interactive TUI session.
 cligate.Dial(host, port, password string, args []string) error
 
 // Server: handle incoming SSH commands and TUI sessions.
@@ -71,7 +72,9 @@ cmd := &cli.Command{
         port := strconv.Itoa(cmd.Int("port"))
         password := cmd.String("password")
 
-        if err := cligate.Dial(host, port, password, os.Args); err != nil {
+        // cmd.Args().Slice() contains only the subcommand and its args,
+        // excluding root-level flags like --host/--port/--password.
+        if err := cligate.Dial(host, port, password, cmd.Args().Slice()); err != nil {
             return ctx, fmt.Errorf("server connection failed: %w", err)
         }
 
@@ -122,11 +125,19 @@ var rootCmd = &cobra.Command{
             return nil // don't forward the serve command itself
         }
 
-        host, _ := cmd.Flags().GetString("host")
-        port, _ := cmd.Flags().GetInt("port")
-        password, _ := cmd.Flags().GetString("password")
+        host, _ := cmd.Root().PersistentFlags().GetString("host")
+        port, _ := cmd.Root().PersistentFlags().GetInt("port")
+        password, _ := cmd.Root().PersistentFlags().GetString("password")
 
-        if err := cligate.Dial(host, strconv.Itoa(port), password, os.Args); err != nil {
+        // Build forwarded args: subcommand name + its own flags + positional args.
+        // This excludes persistent connection flags (--host/--port/--password).
+        fwdArgs := []string{cmd.Name()}
+        cmd.NonInheritedFlags().Visit(func(f *pflag.Flag) {
+            fwdArgs = append(fwdArgs, "--"+f.Name, f.Value.String())
+        })
+        fwdArgs = append(fwdArgs, args...)
+
+        if err := cligate.Dial(host, strconv.Itoa(port), password, fwdArgs); err != nil {
             return fmt.Errorf("server connection failed: %w", err)
         }
 
