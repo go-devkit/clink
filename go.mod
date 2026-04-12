@@ -1,4 +1,4 @@
-module github.com/go-devkit/cligate
+module github.com/go-devkit/clink
 
 go 1.25
 
