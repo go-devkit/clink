@@ -2,9 +2,8 @@ package cligate
 
 import (
 	"context"
+	"errors"
 	"fmt"
-
-	"github.com/urfave/cli/v3"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/ssh"
@@ -12,9 +11,18 @@ import (
 	"github.com/charmbracelet/wish/bubbletea"
 )
 
+// Handler processes a CLI command received over SSH.
+// args contains the parsed command arguments (without leading "--" separators).
+// Return ErrNotHandled to signal that the command is not recognized,
+// which causes the server to fall through to the TUI middleware.
+type Handler func(ctx context.Context, s ssh.Session, args []string) error
+
+// ErrNotHandled is returned by a Handler to indicate the command was not recognized.
+var ErrNotHandled = errors.New("command not handled")
+
 func Serve(
 	ctx context.Context, port, password string,
-	newCLI func() *cli.Command, newTUI func(ssh.Session) (tea.Model, []tea.ProgramOption),
+	handler Handler, newTUI func(ssh.Session) (tea.Model, []tea.ProgramOption),
 ) error {
 	s, err := wish.NewServer(
 		wish.WithAddress(":"+port),
@@ -23,7 +31,7 @@ func Serve(
 		}),
 		wish.WithMiddleware(
 			bubbletea.Middleware(newTUI),
-			tryCLI(ctx, newCLI),
+			handleCLI(ctx, handler),
 		),
 	)
 	if err != nil {
@@ -37,57 +45,33 @@ func QuitTea() tea.Model {
 	return quitTea{}
 }
 
-func tryCLI(ctx context.Context, newCLI func() *cli.Command) func(next ssh.Handler) ssh.Handler {
+func handleCLI(ctx context.Context, handler Handler) func(next ssh.Handler) ssh.Handler {
 	return func(next ssh.Handler) ssh.Handler {
 		return func(s ssh.Session) {
-			command := s.Command()
+			args := s.Command()
 
-			if len(command) > 0 && command[0] == "--" {
-				command = command[1:]
+			if len(args) > 0 && args[0] == "--" {
+				args = args[1:]
 			}
 
-			if len(command) < 1 {
+			if len(args) < 1 {
 				next(s)
 				return
 			}
 
-			cmd := newCLI()
-			propagateWriter(s, cmd)
-
-			if sub := cmd.Command(command[0]); sub != nil {
-				command = append([]string{cmd.Name}, command...)
-				if err := cmd.Run(ctx, command); err != nil {
-					fmt.Fprintf(s.Stderr(), "%v\n", err)
-
-					if err := s.Exit(1); err != nil {
-						fmt.Fprintf(s.Stderr(), "%v\n", err)
-					}
+			if err := handler(ctx, s, args); err != nil {
+				if errors.Is(err, ErrNotHandled) {
+					next(s)
+					return
 				}
 
+				fmt.Fprintf(s.Stderr(), "%v\n", err)
+				if err := s.Exit(1); err != nil {
+					fmt.Fprintf(s.Stderr(), "%v\n", err)
+				}
 				return
 			}
-
-			// Call the next handler
-			next(s)
 		}
-	}
-}
-
-//
-// -- HELPER
-//
-
-func propagateWriter(s ssh.Session, cmd *cli.Command) {
-	cmd.Reader = s
-	cmd.Writer = s
-	cmd.ErrWriter = s.Stderr()
-
-	if len(cmd.Commands) < 1 {
-		return
-	}
-
-	for _, sub := range cmd.Commands {
-		propagateWriter(s, sub)
 	}
 }
 

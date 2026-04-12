@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/ssh"
@@ -14,9 +15,22 @@ import (
 func main() {
 	cmd := &cli.Command{
 		Name: "testapp",
-		Before: cligate.Forward(
-			cligate.WithIgnoreCommands("serve"),
-		),
+		Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+			cmdName := cmd.Args().First()
+			if cmdName == "serve" {
+				return ctx, nil
+			}
+
+			host := cmd.String("host")
+			port := strconv.Itoa(cmd.Int("port"))
+			password := cmd.String("password")
+
+			if err := cligate.Dial(host, port, password, cmd.Args().Slice()); err != nil {
+				return ctx, fmt.Errorf("server connection failed: %w", err)
+			}
+
+			return ctx, cli.Exit("", 0)
+		},
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "host", Value: "localhost"},
 			&cli.IntFlag{Name: "port", Value: 2222},
@@ -30,7 +44,7 @@ func main() {
 		Usage: "Start the SSH server",
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			fmt.Println("starting server on :2222")
-			return cligate.Serve(ctx, "2222", "test", newCLI, newTUI)
+			return cligate.Serve(ctx, "2222", "test", newHandler(), newTUI)
 		},
 	})
 
@@ -40,10 +54,30 @@ func main() {
 	}
 }
 
-func newCLI() *cli.Command {
-	return &cli.Command{
-		Name:     "testapp",
-		Commands: commands(),
+func newHandler() cligate.Handler {
+	return func(ctx context.Context, s ssh.Session, args []string) error {
+		cmd := &cli.Command{
+			Name:     "testapp",
+			Commands: commands(),
+		}
+
+		propagateWriter(s, cmd)
+
+		if cmd.Command(args[0]) == nil {
+			return cligate.ErrNotHandled
+		}
+
+		return cmd.Run(ctx, append([]string{cmd.Name}, args...))
+	}
+}
+
+func propagateWriter(s ssh.Session, cmd *cli.Command) {
+	cmd.Reader = s
+	cmd.Writer = s
+	cmd.ErrWriter = s.Stderr()
+
+	for _, sub := range cmd.Commands {
+		propagateWriter(s, sub)
 	}
 }
 
