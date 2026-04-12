@@ -1,25 +1,33 @@
 # cligate
 
-A framework-agnostic remote CLI/TUI gateway over SSH.
+Connect CLI invocations to a long-running daemon instance of the same binary.
 
-Forward CLI commands and [BubbleTea](https://github.com/charmbracelet/bubbletea) TUIs to a remote server via SSH — works with any CLI framework or none at all.
+One binary, two modes: the daemon runs endlessly (`serve`), and subsequent invocations connect to it to execute CLI commands or open a TUI.
 
 ## Core API
 
 ```go
-// Client: forward args to a remote SSH server.
+type Config struct {
+    Host     string // client only; defaults to "localhost"
+    Port     int
+    Password string
+}
+
+type Session interface {
+    io.Reader
+    io.Writer
+    Stderr() io.Writer
+}
+
+type Handler func(ctx context.Context, s Session, args []string) error
+
+// Daemon side: listen for incoming commands and TUI sessions.
+// Pass nil for newTUI if no TUI is needed.
+cligate.Listen(ctx, cfg, handler, newTUI)
+
+// Client side: connect to the daemon and send a command.
 // If args is empty, opens an interactive TUI session.
-cligate.Dial(host, port, password string, args []string) error
-
-// Server: handle incoming SSH commands and TUI sessions.
-cligate.Serve(ctx, port, password string, handler Handler, newTUI func(ssh.Session) (tea.Model, []tea.ProgramOption)) error
-
-// Handler processes a CLI command received over SSH.
-// Return ErrNotHandled to fall through to the TUI.
-type Handler func(ctx context.Context, s ssh.Session, args []string) error
-
-// QuitTea returns a no-op BubbleTea model for when no TUI is needed.
-cligate.QuitTea() tea.Model
+cligate.Connect(cfg, args)
 ```
 
 ## Usage with urfave/cli v3
@@ -28,13 +36,13 @@ cligate.QuitTea() tea.Model
 
 ```go
 func startServer(ctx context.Context) error {
-    handler := func(ctx context.Context, s ssh.Session, args []string) error {
+    handler := func(ctx context.Context, s cligate.Session, args []string) error {
         cmd := &cli.Command{
             Name:     "myapp",
             Commands: commands(), // your subcommands
         }
 
-        // Wire SSH session I/O into the CLI command tree
+        // Wire session I/O into the CLI command tree
         propagateWriter(s, cmd)
 
         if cmd.Command(args[0]) == nil {
@@ -44,10 +52,11 @@ func startServer(ctx context.Context) error {
         return cmd.Run(ctx, append([]string{cmd.Name}, args...))
     }
 
-    return cligate.Serve(ctx, "2222", "secret", handler, newTUI)
+    cfg := cligate.Config{Port: 2222, Password: "secret"}
+    return cligate.Listen(ctx, cfg, handler, newTUI)
 }
 
-func propagateWriter(s ssh.Session, cmd *cli.Command) {
+func propagateWriter(s cligate.Session, cmd *cli.Command) {
     cmd.Reader = s
     cmd.Writer = s
     cmd.ErrWriter = s.Stderr()
@@ -68,14 +77,16 @@ cmd := &cli.Command{
             return ctx, nil // don't forward the serve command itself
         }
 
-        host := cmd.String("host")
-        port := strconv.Itoa(cmd.Int("port"))
-        password := cmd.String("password")
+        cfg := cligate.Config{
+            Host:     cmd.String("host"),
+            Port:     int(cmd.Int("port")),
+            Password: cmd.String("password"),
+        }
 
         // cmd.Args().Slice() contains only the subcommand and its args,
         // excluding root-level flags like --host/--port/--password.
-        if err := cligate.Dial(host, port, password, cmd.Args().Slice()); err != nil {
-            return ctx, fmt.Errorf("server connection failed: %w", err)
+        if err := cligate.Connect(cfg, cmd.Args().Slice()); err != nil {
+            return ctx, fmt.Errorf("connection failed: %w", err)
         }
 
         return ctx, cli.Exit("", 0) // prevent local execution
@@ -95,7 +106,7 @@ cmd := &cli.Command{
 
 ```go
 func startServer(ctx context.Context) error {
-    handler := func(ctx context.Context, s ssh.Session, args []string) error {
+    handler := func(ctx context.Context, s cligate.Session, args []string) error {
         cmd := newRootCmd() // your cobra root command
 
         cmd.SetIn(s)
@@ -111,7 +122,8 @@ func startServer(ctx context.Context) error {
         return err
     }
 
-    return cligate.Serve(ctx, "2222", "secret", handler, newTUI)
+    cfg := cligate.Config{Port: 2222, Password: "secret"}
+    return cligate.Listen(ctx, cfg, handler, nil)
 }
 ```
 
@@ -129,6 +141,8 @@ var rootCmd = &cobra.Command{
         port, _ := cmd.Root().PersistentFlags().GetInt("port")
         password, _ := cmd.Root().PersistentFlags().GetString("password")
 
+        cfg := cligate.Config{Host: host, Port: port, Password: password}
+
         // Build forwarded args: subcommand name + its own flags + positional args.
         // This excludes persistent connection flags (--host/--port/--password).
         fwdArgs := []string{cmd.Name()}
@@ -137,8 +151,8 @@ var rootCmd = &cobra.Command{
         })
         fwdArgs = append(fwdArgs, args...)
 
-        if err := cligate.Dial(host, strconv.Itoa(port), password, fwdArgs); err != nil {
-            return fmt.Errorf("server connection failed: %w", err)
+        if err := cligate.Connect(cfg, fwdArgs); err != nil {
+            return fmt.Errorf("connection failed: %w", err)
         }
 
         os.Exit(0) // prevent local execution
@@ -147,8 +161,8 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-    rootCmd.PersistentFlags().String("host", "localhost", "remote server host")
-    rootCmd.PersistentFlags().Int("port", 2222, "remote server port")
-    rootCmd.PersistentFlags().String("password", "", "remote server password")
+    rootCmd.PersistentFlags().String("host", "localhost", "daemon host")
+    rootCmd.PersistentFlags().Int("port", 2222, "daemon port")
+    rootCmd.PersistentFlags().String("password", "", "daemon password")
 }
 ```

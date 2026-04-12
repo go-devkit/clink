@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"strconv"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/keygen"
@@ -12,37 +14,60 @@ import (
 	"github.com/charmbracelet/wish/bubbletea"
 )
 
-// Handler processes a CLI command received over SSH.
+// Config holds the connection settings for Listen and Connect.
+type Config struct {
+	Host     string // used by Connect only; defaults to "localhost"
+	Port     int
+	Password string
+}
+
+// Session provides I/O for command handlers.
+type Session interface {
+	io.Reader
+	io.Writer
+	Stderr() io.Writer
+}
+
+// Handler processes a CLI command received from a connected client.
 // args contains the parsed command arguments (without leading "--" separators).
 // Return ErrNotHandled to signal that the command is not recognized,
-// which causes the server to fall through to the TUI middleware.
-type Handler func(ctx context.Context, s ssh.Session, args []string) error
+// which causes the server to fall through to the TUI.
+type Handler func(ctx context.Context, s Session, args []string) error
 
 // ErrNotHandled is returned by a Handler to indicate the command was not recognized.
 var ErrNotHandled = errors.New("command not handled")
 
-func Serve(
-	ctx context.Context, port, password string,
-	handler Handler, newTUI func(ssh.Session) (tea.Model, []tea.ProgramOption),
+// Listen starts the daemon and handles incoming CLI commands and TUI sessions.
+// If newTUI is nil, connections without a command are closed immediately.
+func Listen(
+	ctx context.Context, cfg Config,
+	handler Handler, newTUI func() (tea.Model, []tea.ProgramOption),
 ) error {
 	k, err := keygen.New("", keygen.WithKeyType(keygen.Ed25519))
 	if err != nil {
 		return fmt.Errorf("failed to generate host key: %w", err)
 	}
 
+	tuiHandler := func(s ssh.Session) (tea.Model, []tea.ProgramOption) {
+		if newTUI == nil {
+			return quitTea{}, nil
+		}
+		return newTUI()
+	}
+
 	s, err := wish.NewServer(
-		wish.WithAddress(":"+port),
+		wish.WithAddress(":"+strconv.Itoa(cfg.Port)),
 		wish.WithHostKeyPEM(k.RawPrivateKey()),
 		wish.WithPasswordAuth(func(ctx ssh.Context, pass string) bool {
-			return pass == password
+			return pass == cfg.Password
 		}),
 		wish.WithMiddleware(
-			bubbletea.Middleware(newTUI),
+			bubbletea.Middleware(tuiHandler),
 			handleCLI(ctx, handler),
 		),
 	)
 	if err != nil {
-		return fmt.Errorf("failed to create wish server: %w", err)
+		return fmt.Errorf("failed to create server: %w", err)
 	}
 
 	errCh := make(chan error, 1)
@@ -65,10 +90,6 @@ func Serve(
 	}
 }
 
-func QuitTea() tea.Model {
-	return quitTea{}
-}
-
 func handleCLI(ctx context.Context, handler Handler) func(next ssh.Handler) ssh.Handler {
 	return func(next ssh.Handler) ssh.Handler {
 		return func(s ssh.Session) {
@@ -83,7 +104,7 @@ func handleCLI(ctx context.Context, handler Handler) func(next ssh.Handler) ssh.
 				return
 			}
 
-			if err := handler(ctx, s, args); err != nil {
+			if err := handler(ctx, &sessionWrapper{s}, args); err != nil {
 				if errors.Is(err, ErrNotHandled) {
 					next(s)
 					return
@@ -99,7 +120,14 @@ func handleCLI(ctx context.Context, handler Handler) func(next ssh.Handler) ssh.
 	}
 }
 
-// quitTea is a bubbletea model that immediately quits.
+type sessionWrapper struct {
+	s ssh.Session
+}
+
+func (w *sessionWrapper) Read(p []byte) (int, error)  { return w.s.Read(p) }
+func (w *sessionWrapper) Write(p []byte) (int, error) { return w.s.Write(p) }
+func (w *sessionWrapper) Stderr() io.Writer            { return w.s.Stderr() }
+
 type quitTea struct{}
 
 func (quitTea) Init() tea.Cmd {
