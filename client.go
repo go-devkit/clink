@@ -4,24 +4,30 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
 
-// Dial connects to a remote SSH server and forwards the given args as a command.
-// If args is empty, it requests a PTY and launches the TUI.
-func Dial(host, port, password string, args []string) error {
+// Connect sends args to the running daemon.
+// If args is empty, it opens an interactive TUI session.
+func Connect(conf Config, args []string) error {
+	host := conf.Host
+	if host == "" {
+		host = "localhost"
+	}
+
 	config := &ssh.ClientConfig{
 		User: "user",
 		Auth: []ssh.AuthMethod{
-			ssh.Password(password),
+			ssh.Password(conf.Password),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
-	conn, err := ssh.Dial("tcp", net.JoinHostPort(host, port), config)
+	conn, err := ssh.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(conf.Port)), config)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
@@ -83,8 +89,6 @@ func Dial(host, port, password string, args []string) error {
 	return session.Run("tui")
 }
 
-// shellQuote quotes a string using POSIX single-quote escaping,
-// safe for parsing by go-shlex on the server side.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }

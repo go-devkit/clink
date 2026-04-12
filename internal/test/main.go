@@ -5,29 +5,33 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/ssh"
 	"github.com/go-devkit/cligate"
 	"github.com/urfave/cli/v3"
 )
+
+var defaultConf = cligate.Config{
+	Port:     2222,
+	Password: "test",
+}
 
 func main() {
 	cmd := &cli.Command{
 		Name: "testapp",
 		Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
-			cmdName := cmd.Args().First()
-			if cmdName == "serve" {
+			if cmd.Args().First() == "serve" {
 				return ctx, nil
 			}
 
-			host := cmd.String("host")
-			port := strconv.Itoa(cmd.Int("port"))
-			password := cmd.String("password")
+			conf := cligate.Config{
+				Host:     cmd.String("host"),
+				Port:     int(cmd.Int("port")),
+				Password: cmd.String("password"),
+			}
 
-			if err := cligate.Dial(host, port, password, cmd.Args().Slice()); err != nil {
+			if err := cligate.Connect(conf, cmd.Args().Slice()); err != nil {
 				return ctx, fmt.Errorf("server connection failed: %w", err)
 			}
 
@@ -46,7 +50,7 @@ func main() {
 		Usage: "Start the SSH server",
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			fmt.Println("starting server on :2222")
-			return cligate.Serve(ctx, "2222", "test", newHandler(), newTUI)
+			return cligate.Listen(ctx, defaultConf, newHandler(), newTUI)
 		},
 	})
 
@@ -60,7 +64,7 @@ func main() {
 }
 
 func newHandler() cligate.Handler {
-	return func(ctx context.Context, s ssh.Session, args []string) error {
+	return func(ctx context.Context, s cligate.Session, args []string) error {
 		cmd := &cli.Command{
 			Name:     "testapp",
 			Commands: commands(),
@@ -76,7 +80,7 @@ func newHandler() cligate.Handler {
 	}
 }
 
-func propagateWriter(s ssh.Session, cmd *cli.Command) {
+func propagateWriter(s cligate.Session, cmd *cli.Command) {
 	cmd.Reader = s
 	cmd.Writer = s
 	cmd.ErrWriter = s.Stderr()
@@ -86,13 +90,8 @@ func propagateWriter(s ssh.Session, cmd *cli.Command) {
 	}
 }
 
-func newTUI(s ssh.Session) (tea.Model, []tea.ProgramOption) {
-	pty, _, _ := s.Pty()
-	m := tuiModel{
-		width:  pty.Window.Width,
-		height: pty.Window.Height,
-	}
-	return m, []tea.ProgramOption{tea.WithAltScreen()}
+func newTUI() (tea.Model, []tea.ProgramOption) {
+	return tuiModel{}, []tea.ProgramOption{tea.WithAltScreen()}
 }
 
 func commands() []*cli.Command {
