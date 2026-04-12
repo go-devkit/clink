@@ -13,8 +13,8 @@ import (
 
 // Connect sends args to the running daemon.
 // If args is empty, it opens an interactive TUI session.
-func Connect(cfg Config, args []string) error {
-	host := cfg.Host
+func Connect(conf Config, args []string) error {
+	host := conf.Host
 	if host == "" {
 		host = "localhost"
 	}
@@ -22,12 +22,12 @@ func Connect(cfg Config, args []string) error {
 	config := &ssh.ClientConfig{
 		User: "user",
 		Auth: []ssh.AuthMethod{
-			ssh.Password(cfg.Password),
+			ssh.Password(conf.Password),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
-	conn, err := ssh.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(cfg.Port)), config)
+	conn, err := ssh.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(conf.Port)), config)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}

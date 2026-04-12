@@ -12,7 +12,7 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-var defaultCfg = cligate.Config{
+var defaultConf = cligate.Config{
 	Port:     2222,
 	Password: "test",
 }
@@ -25,13 +25,13 @@ func main() {
 				return ctx, nil
 			}
 
-			cfg := cligate.Config{
+			conf := cligate.Config{
 				Host:     cmd.String("host"),
 				Port:     int(cmd.Int("port")),
 				Password: cmd.String("password"),
 			}
 
-			if err := cligate.Connect(cfg, cmd.Args().Slice()); err != nil {
+			if err := cligate.Connect(conf, cmd.Args().Slice()); err != nil {
 				return ctx, fmt.Errorf("server connection failed: %w", err)
 			}
 
@@ -50,7 +50,7 @@ func main() {
 		Usage: "Start the SSH server",
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			fmt.Println("starting server on :2222")
-			return cligate.Listen(ctx, defaultCfg, newHandler(), newTUI)
+			return cligate.Listen(ctx, defaultConf, newHandler(), newTUI)
 		},
 	})
 

@@ -23,11 +23,11 @@ type Handler func(ctx context.Context, s Session, args []string) error
 
 // Daemon side: listen for incoming commands and TUI sessions.
 // Pass nil for newTUI if no TUI is needed.
-cligate.Listen(ctx, cfg, handler, newTUI)
+cligate.Listen(ctx, conf, handler, newTUI)
 
 // Client side: connect to the daemon and send a command.
 // If args is empty, opens an interactive TUI session.
-cligate.Connect(cfg, args)
+cligate.Connect(conf, args)
 ```
 
 ## Usage with urfave/cli v3
@@ -52,8 +52,8 @@ func startServer(ctx context.Context) error {
         return cmd.Run(ctx, append([]string{cmd.Name}, args...))
     }
 
-    cfg := cligate.Config{Port: 2222, Password: "secret"}
-    return cligate.Listen(ctx, cfg, handler, newTUI)
+    conf := cligate.Config{Port: 2222, Password: "secret"}
+    return cligate.Listen(ctx, conf, handler, newTUI)
 }
 
 func propagateWriter(s cligate.Session, cmd *cli.Command) {
@@ -77,7 +77,7 @@ cmd := &cli.Command{
             return ctx, nil // don't forward the serve command itself
         }
 
-        cfg := cligate.Config{
+        conf := cligate.Config{
             Host:     cmd.String("host"),
             Port:     int(cmd.Int("port")),
             Password: cmd.String("password"),
@@ -85,7 +85,7 @@ cmd := &cli.Command{
 
         // cmd.Args().Slice() contains only the subcommand and its args,
         // excluding root-level flags like --host/--port/--password.
-        if err := cligate.Connect(cfg, cmd.Args().Slice()); err != nil {
+        if err := cligate.Connect(conf, cmd.Args().Slice()); err != nil {
             return ctx, fmt.Errorf("connection failed: %w", err)
         }
 
@@ -122,8 +122,8 @@ func startServer(ctx context.Context) error {
         return err
     }
 
-    cfg := cligate.Config{Port: 2222, Password: "secret"}
-    return cligate.Listen(ctx, cfg, handler, nil)
+    conf := cligate.Config{Port: 2222, Password: "secret"}
+    return cligate.Listen(ctx, conf, handler, nil)
 }
 ```
 
@@ -141,7 +141,7 @@ var rootCmd = &cobra.Command{
         port, _ := cmd.Root().PersistentFlags().GetInt("port")
         password, _ := cmd.Root().PersistentFlags().GetString("password")
 
-        cfg := cligate.Config{Host: host, Port: port, Password: password}
+        conf := cligate.Config{Host: host, Port: port, Password: password}
 
         // Build forwarded args: subcommand name + its own flags + positional args.
         // This excludes persistent connection flags (--host/--port/--password).
@@ -151,7 +151,7 @@ var rootCmd = &cobra.Command{
         })
         fwdArgs = append(fwdArgs, args...)
 
-        if err := cligate.Connect(cfg, fwdArgs); err != nil {
+        if err := cligate.Connect(conf, fwdArgs); err != nil {
             return fmt.Errorf("connection failed: %w", err)
         }
 

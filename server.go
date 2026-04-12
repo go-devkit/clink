@@ -40,7 +40,7 @@ var ErrNotHandled = errors.New("command not handled")
 // Listen starts the daemon and handles incoming CLI commands and TUI sessions.
 // If newTUI is nil, connections without a command are closed immediately.
 func Listen(
-	ctx context.Context, cfg Config,
+	ctx context.Context, conf Config,
 	handler Handler, newTUI func() (tea.Model, []tea.ProgramOption),
 ) error {
 	k, err := keygen.New("", keygen.WithKeyType(keygen.Ed25519))
@@ -56,10 +56,10 @@ func Listen(
 	}
 
 	s, err := wish.NewServer(
-		wish.WithAddress(":"+strconv.Itoa(cfg.Port)),
+		wish.WithAddress(":"+strconv.Itoa(conf.Port)),
 		wish.WithHostKeyPEM(k.RawPrivateKey()),
 		wish.WithPasswordAuth(func(ctx ssh.Context, pass string) bool {
-			return pass == cfg.Password
+			return pass == conf.Password
 		}),
 		wish.WithMiddleware(
 			bubbletea.Middleware(tuiHandler),
