@@ -1,4 +1,4 @@
-# cligate
+# clink
 
 Connect CLI invocations to a long-running daemon instance of the same binary.
 
@@ -23,11 +23,11 @@ type Handler func(ctx context.Context, s Session, args []string) error
 
 // Daemon side: listen for incoming commands and TUI sessions.
 // Pass nil for newTUI if no TUI is needed.
-cligate.Listen(ctx, conf, handler, newTUI)
+clink.Listen(ctx, conf, handler, newTUI)
 
 // Client side: connect to the daemon and send a command.
 // If args is empty, opens an interactive TUI session.
-cligate.Connect(conf, args)
+clink.Connect(conf, args)
 ```
 
 ## Usage with urfave/cli v3
@@ -36,7 +36,7 @@ cligate.Connect(conf, args)
 
 ```go
 func startServer(ctx context.Context) error {
-    handler := func(ctx context.Context, s cligate.Session, args []string) error {
+    handler := func(ctx context.Context, s clink.Session, args []string) error {
         cmd := &cli.Command{
             Name:     "myapp",
             Commands: commands(), // your subcommands
@@ -46,17 +46,17 @@ func startServer(ctx context.Context) error {
         propagateWriter(s, cmd)
 
         if cmd.Command(args[0]) == nil {
-            return cligate.ErrNotHandled
+            return clink.ErrNotHandled
         }
 
         return cmd.Run(ctx, append([]string{cmd.Name}, args...))
     }
 
-    conf := cligate.Config{Port: 2222, Password: "secret"}
-    return cligate.Listen(ctx, conf, handler, newTUI)
+    conf := clink.Config{Port: 2222, Password: "secret"}
+    return clink.Listen(ctx, conf, handler, newTUI)
 }
 
-func propagateWriter(s cligate.Session, cmd *cli.Command) {
+func propagateWriter(s clink.Session, cmd *cli.Command) {
     cmd.Reader = s
     cmd.Writer = s
     cmd.ErrWriter = s.Stderr()
@@ -77,7 +77,7 @@ cmd := &cli.Command{
             return ctx, nil // don't forward the serve command itself
         }
 
-        conf := cligate.Config{
+        conf := clink.Config{
             Host:     cmd.String("host"),
             Port:     int(cmd.Int("port")),
             Password: cmd.String("password"),
@@ -85,7 +85,7 @@ cmd := &cli.Command{
 
         // cmd.Args().Slice() contains only the subcommand and its args,
         // excluding root-level flags like --host/--port/--password.
-        if err := cligate.Connect(conf, cmd.Args().Slice()); err != nil {
+        if err := clink.Connect(conf, cmd.Args().Slice()); err != nil {
             return ctx, fmt.Errorf("connection failed: %w", err)
         }
 
@@ -106,7 +106,7 @@ cmd := &cli.Command{
 
 ```go
 func startServer(ctx context.Context) error {
-    handler := func(ctx context.Context, s cligate.Session, args []string) error {
+    handler := func(ctx context.Context, s clink.Session, args []string) error {
         cmd := newRootCmd() // your cobra root command
 
         cmd.SetIn(s)
@@ -116,14 +116,14 @@ func startServer(ctx context.Context) error {
 
         err := cmd.ExecuteContext(ctx)
         if err != nil && strings.Contains(err.Error(), "unknown command") {
-            return cligate.ErrNotHandled
+            return clink.ErrNotHandled
         }
 
         return err
     }
 
-    conf := cligate.Config{Port: 2222, Password: "secret"}
-    return cligate.Listen(ctx, conf, handler, nil)
+    conf := clink.Config{Port: 2222, Password: "secret"}
+    return clink.Listen(ctx, conf, handler, nil)
 }
 ```
 
@@ -141,7 +141,7 @@ var rootCmd = &cobra.Command{
         port, _ := cmd.Root().PersistentFlags().GetInt("port")
         password, _ := cmd.Root().PersistentFlags().GetString("password")
 
-        conf := cligate.Config{Host: host, Port: port, Password: password}
+        conf := clink.Config{Host: host, Port: port, Password: password}
 
         // Build forwarded args: subcommand name + its own flags + positional args.
         // This excludes persistent connection flags (--host/--port/--password).
@@ -151,7 +151,7 @@ var rootCmd = &cobra.Command{
         })
         fwdArgs = append(fwdArgs, args...)
 
-        if err := cligate.Connect(conf, fwdArgs); err != nil {
+        if err := clink.Connect(conf, fwdArgs); err != nil {
             return fmt.Errorf("connection failed: %w", err)
         }
 

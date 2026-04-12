@@ -8,11 +8,11 @@ import (
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/go-devkit/cligate"
+	"github.com/go-devkit/clink"
 	"github.com/urfave/cli/v3"
 )
 
-var defaultConf = cligate.Config{
+var defaultConf = clink.Config{
 	Port:     2222,
 	Password: "test",
 }
@@ -25,13 +25,13 @@ func main() {
 				return ctx, nil
 			}
 
-			conf := cligate.Config{
+			conf := clink.Config{
 				Host:     cmd.String("host"),
 				Port:     int(cmd.Int("port")),
 				Password: cmd.String("password"),
 			}
 
-			if err := cligate.Connect(conf, cmd.Args().Slice()); err != nil {
+			if err := clink.Connect(conf, cmd.Args().Slice()); err != nil {
 				return ctx, fmt.Errorf("server connection failed: %w", err)
 			}
 
@@ -50,7 +50,7 @@ func main() {
 		Usage: "Start the SSH server",
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			fmt.Println("starting server on :2222")
-			return cligate.Listen(ctx, defaultConf, newHandler(), newTUI)
+			return clink.Listen(ctx, defaultConf, newHandler(), newTUI)
 		},
 	})
 
@@ -63,8 +63,8 @@ func main() {
 	}
 }
 
-func newHandler() cligate.Handler {
-	return func(ctx context.Context, s cligate.Session, args []string) error {
+func newHandler() clink.Handler {
+	return func(ctx context.Context, s clink.Session, args []string) error {
 		cmd := &cli.Command{
 			Name:     "testapp",
 			Commands: commands(),
@@ -73,14 +73,14 @@ func newHandler() cligate.Handler {
 		propagateWriter(s, cmd)
 
 		if cmd.Command(args[0]) == nil {
-			return cligate.ErrNotHandled
+			return clink.ErrNotHandled
 		}
 
 		return cmd.Run(ctx, append([]string{cmd.Name}, args...))
 	}
 }
 
-func propagateWriter(s cligate.Session, cmd *cli.Command) {
+func propagateWriter(s clink.Session, cmd *cli.Command) {
 	cmd.Reader = s
 	cmd.Writer = s
 	cmd.ErrWriter = s.Stderr()

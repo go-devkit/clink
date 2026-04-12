@@ -1,4 +1,4 @@
-package cligate
+package clink
 
 import (
 	"context"
