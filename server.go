@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strconv"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -15,8 +16,16 @@ import (
 )
 
 // Config holds the connection settings for Listen and Connect.
+//
+// Host defaults to "127.0.0.1" on the server (Listen) and "localhost" on the
+// client (Connect). Setting Host to "" keeps Listen bound to loopback only,
+// which is the safe default for a local daemon.
+//
+// Password is optional. When empty, Listen accepts any public key and Connect
+// authenticates with an ephemeral in-memory key — suitable for loopback-only
+// daemons where filesystem/network perms already gate access.
 type Config struct {
-	Host     string // used by Connect only; defaults to "localhost"
+	Host     string
 	Port     int
 	Password string
 }
@@ -55,17 +64,31 @@ func Listen(
 		return newTUI()
 	}
 
-	s, err := wish.NewServer(
-		wish.WithAddress(":"+strconv.Itoa(conf.Port)),
+	host := conf.Host
+	if host == "" {
+		host = "127.0.0.1"
+	}
+
+	opts := []ssh.Option{
+		wish.WithAddress(net.JoinHostPort(host, strconv.Itoa(conf.Port))),
 		wish.WithHostKeyPEM(k.RawPrivateKey()),
-		wish.WithPasswordAuth(func(ctx ssh.Context, pass string) bool {
-			return pass == conf.Password
-		}),
 		wish.WithMiddleware(
 			bubbletea.Middleware(tuiHandler),
 			handleCLI(ctx, handler),
 		),
-	)
+	}
+
+	if conf.Password != "" {
+		opts = append(opts, wish.WithPasswordAuth(func(_ ssh.Context, pass string) bool {
+			return pass == conf.Password
+		}))
+	} else {
+		opts = append(opts, wish.WithPublicKeyAuth(func(_ ssh.Context, _ ssh.PublicKey) bool {
+			return true
+		}))
+	}
+
+	s, err := wish.NewServer(opts...)
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
 	}

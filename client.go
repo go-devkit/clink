@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/keygen"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
@@ -19,11 +20,14 @@ func Connect(conf Config, args []string) error {
 		host = "localhost"
 	}
 
+	auth, err := clientAuth(conf)
+	if err != nil {
+		return err
+	}
+
 	config := &ssh.ClientConfig{
-		User: "user",
-		Auth: []ssh.AuthMethod{
-			ssh.Password(conf.Password),
-		},
+		User:            "user",
+		Auth:            auth,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
@@ -87,6 +91,23 @@ func Connect(conf Config, args []string) error {
 	}
 
 	return session.Run("tui")
+}
+
+// clientAuth returns the SSH auth methods for Connect.
+//
+// If a password is set, password auth is used. Otherwise an ephemeral ed25519
+// key is generated in memory — the server accepts any public key in this mode.
+func clientAuth(conf Config) ([]ssh.AuthMethod, error) {
+	if conf.Password != "" {
+		return []ssh.AuthMethod{ssh.Password(conf.Password)}, nil
+	}
+
+	k, err := keygen.New("", keygen.WithKeyType(keygen.Ed25519))
+	if err != nil {
+		return nil, fmt.Errorf("generate ephemeral key: %w", err)
+	}
+
+	return []ssh.AuthMethod{ssh.PublicKeys(k.Signer())}, nil
 }
 
 func shellQuote(s string) string {
