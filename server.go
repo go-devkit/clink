@@ -23,7 +23,8 @@ import (
 //
 // Password is optional. When empty, Listen accepts any public key and Connect
 // authenticates with an ephemeral in-memory key — suitable for loopback-only
-// daemons where filesystem/network perms already gate access.
+// daemons where filesystem/network perms already gate access. Listen returns
+// an error if Password is empty and Host does not resolve to loopback.
 type Config struct {
 	Host     string
 	Port     int
@@ -67,6 +68,10 @@ func Listen(
 	host := conf.Host
 	if host == "" {
 		host = "127.0.0.1"
+	}
+
+	if conf.Password == "" && !isLoopback(host) {
+		return fmt.Errorf("clink: refusing to start with empty Password on non-loopback host %q; set Password or bind to loopback", host)
 	}
 
 	opts := []ssh.Option{
@@ -150,6 +155,26 @@ type sessionWrapper struct {
 func (w *sessionWrapper) Read(p []byte) (int, error)  { return w.s.Read(p) }
 func (w *sessionWrapper) Write(p []byte) (int, error) { return w.s.Write(p) }
 func (w *sessionWrapper) Stderr() io.Writer            { return w.s.Stderr() }
+
+func isLoopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	addrs, err := net.LookupHost(host)
+	if err != nil || len(addrs) == 0 {
+		return false
+	}
+	for _, a := range addrs {
+		ip := net.ParseIP(a)
+		if ip == nil || !ip.IsLoopback() {
+			return false
+		}
+	}
+	return true
+}
 
 type quitTea struct{}
 

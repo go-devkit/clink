@@ -8,9 +8,9 @@ One binary, two modes: the daemon runs endlessly (`serve`), and subsequent invoc
 
 ```go
 type Config struct {
-    Host     string // client only; defaults to "localhost"
+    Host     string // server defaults to "127.0.0.1", client to "localhost"
     Port     int
-    Password string
+    Password string // optional; empty uses ephemeral key auth (loopback only)
 }
 
 type Session interface {
