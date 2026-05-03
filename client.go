@@ -25,10 +25,15 @@ func Connect(conf Config, args []string) error {
 		return err
 	}
 
+	hostKeyCallback, err := hostKeyCallback(conf)
+	if err != nil {
+		return err
+	}
+
 	config := &ssh.ClientConfig{
 		User:            "user",
 		Auth:            auth,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeyCallback,
 	}
 
 	conn, err := ssh.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(conf.Port)), config)
@@ -108,6 +113,22 @@ func clientAuth(conf Config) ([]ssh.AuthMethod, error) {
 	}
 
 	return []ssh.AuthMethod{ssh.PublicKeys(k.Signer())}, nil
+}
+
+// hostKeyCallback returns the SSH host key verification callback for Connect.
+//
+// If conf.HostPublicKey is set, the daemon's host key must match. Otherwise
+// host key verification is disabled — only safe on loopback.
+func hostKeyCallback(conf Config) (ssh.HostKeyCallback, error) {
+	if len(conf.HostPublicKey) == 0 {
+		return ssh.InsecureIgnoreHostKey(), nil
+	}
+
+	pub, _, _, _, err := ssh.ParseAuthorizedKey(conf.HostPublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("parse HostPublicKey: %w", err)
+	}
+	return ssh.FixedHostKey(pub), nil
 }
 
 func shellQuote(s string) string {

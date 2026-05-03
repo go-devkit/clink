@@ -24,13 +24,24 @@ import (
 //
 // Password is optional. When empty, Listen accepts any public key and Connect
 // authenticates with an ephemeral in-memory key — effectively no auth. Listen
-// returns an error if Password is empty and Host does not resolve to loopback.
-// On shared hosts any local user or process that can reach the loopback port
-// can connect; set Password when running on multi-user machines.
+// returns an error if Password is empty and Host is not a literal loopback IP
+// (e.g. 127.0.0.1, ::1); hostnames are rejected to avoid DNS-dependent safety
+// checks. On shared hosts any local user or process that can reach the loopback
+// port can connect; set Password when running on multi-user machines.
 type Config struct {
 	Host     string
 	Port     int
 	Password string
+
+	// HostKeyPEM (server) is an optional PEM-encoded private key used as the
+	// daemon's SSH host key. When empty, Listen generates an ephemeral key on
+	// each start; clients then cannot pin the host key across restarts.
+	HostKeyPEM []byte
+
+	// HostPublicKey (client) is an optional SSH public key in authorized_keys
+	// format. When set, Connect verifies the daemon presents this host key,
+	// preventing MITM. When empty, host key verification is disabled.
+	HostPublicKey []byte
 }
 
 // Session provides I/O for command handlers.
@@ -55,9 +66,13 @@ func Listen(
 	ctx context.Context, conf Config,
 	handler Handler, newTUI func() (tea.Model, []tea.ProgramOption),
 ) error {
-	k, err := keygen.New("", keygen.WithKeyType(keygen.Ed25519))
-	if err != nil {
-		return fmt.Errorf("failed to generate host key: %w", err)
+	hostKeyPEM := conf.HostKeyPEM
+	if len(hostKeyPEM) == 0 {
+		k, err := keygen.New("", keygen.WithKeyType(keygen.Ed25519))
+		if err != nil {
+			return fmt.Errorf("failed to generate host key: %w", err)
+		}
+		hostKeyPEM = k.RawPrivateKey()
 	}
 
 	tuiHandler := func(s ssh.Session) (tea.Model, []tea.ProgramOption) {
@@ -81,12 +96,12 @@ func Listen(
 	}
 
 	if conf.Password == "" && !isLoopback(host) {
-		return fmt.Errorf("refusing to start with empty Password on non-loopback host %q; set Password or bind to loopback", host)
+		return fmt.Errorf("refusing to start with empty Password on non-loopback host %q; set Password or bind to a literal loopback IP (e.g. 127.0.0.1)", host)
 	}
 
 	opts := []ssh.Option{
 		wish.WithAddress(net.JoinHostPort(host, strconv.Itoa(conf.Port))),
-		wish.WithHostKeyPEM(k.RawPrivateKey()),
+		wish.WithHostKeyPEM(hostKeyPEM),
 		wish.WithMiddleware(
 			bubbletea.Middleware(tuiHandler),
 			handleCLI(ctx, handler),
@@ -167,20 +182,8 @@ func (w *sessionWrapper) Write(p []byte) (int, error) { return w.s.Write(p) }
 func (w *sessionWrapper) Stderr() io.Writer            { return w.s.Stderr() }
 
 func isLoopback(host string) bool {
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	addrs, err := net.LookupHost(host)
-	if err != nil || len(addrs) == 0 {
-		return false
-	}
-	for _, a := range addrs {
-		ip := net.ParseIP(a)
-		if ip == nil || !ip.IsLoopback() {
-			return false
-		}
-	}
-	return true
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 type quitTea struct{}

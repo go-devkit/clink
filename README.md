@@ -11,6 +11,9 @@ type Config struct {
     Host     string // server defaults to "127.0.0.1", client to "localhost"
     Port     int
     Password string // optional; empty disables auth (loopback only; not safe on multi-user hosts)
+
+    HostKeyPEM    []byte // server: optional persisted SSH host private key (PEM). Empty = ephemeral per Listen.
+    HostPublicKey []byte // client: optional pinned host public key (authorized_keys format). Empty = no verification.
 }
 
 type Session interface {
