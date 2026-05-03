@@ -10,7 +10,7 @@ One binary, two modes: the daemon runs endlessly (`serve`), and subsequent invoc
 type Config struct {
     Host     string // server defaults to "127.0.0.1", client to "localhost"
     Port     int
-    Password string // optional; empty disables auth (loopback only, single-user host)
+    Password string // optional; empty disables auth (loopback only; not safe on multi-user hosts)
 }
 
 type Session interface {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/keygen"
@@ -69,6 +70,10 @@ func Listen(
 	host := conf.Host
 	if host == "" {
 		host = "127.0.0.1"
+	}
+
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
 	}
 
 	if _, _, err := net.SplitHostPort(host); err == nil {
