@@ -213,5 +213,5 @@ func (qt quitTea) Update(_ tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (quitTea) View() tea.View {
-	return tea.View{}
+	return tea.NewView("")
 }
