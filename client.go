@@ -17,7 +17,11 @@ import (
 func Connect(conf Config, args []string) error {
 	host := conf.Host
 	if host == "" {
-		host = "localhost"
+		host = "127.0.0.1"
+	}
+
+	if len(conf.HostPublicKey) == 0 && !isLoopback(host) {
+		return fmt.Errorf("refusing to connect to non-loopback host %q without HostPublicKey; pin the daemon's host key or use a literal loopback IP (e.g. 127.0.0.1)", host)
 	}
 
 	auth, err := clientAuth(conf)

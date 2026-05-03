@@ -38,9 +38,10 @@ type Config struct {
 	// each start; clients then cannot pin the host key across restarts.
 	HostKeyPEM []byte
 
-	// HostPublicKey (client) is an optional SSH public key in authorized_keys
-	// format. When set, Connect verifies the daemon presents this host key,
-	// preventing MITM. When empty, host key verification is disabled.
+	// HostPublicKey (client) is an SSH public key in authorized_keys format
+	// that Connect uses to verify the daemon's host key, preventing MITM.
+	// Required when Host is not a literal loopback IP; empty disables
+	// verification (loopback only).
 	HostPublicKey []byte
 }
 

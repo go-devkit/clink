@@ -13,7 +13,7 @@ type Config struct {
     Password string // optional; empty disables auth (loopback only; not safe on multi-user hosts)
 
     HostKeyPEM    []byte // server: optional persisted SSH host private key (PEM). Empty = ephemeral per Listen.
-    HostPublicKey []byte // client: optional pinned host public key (authorized_keys format). Empty = no verification.
+    HostPublicKey []byte // client: pinned host public key (authorized_keys format). Required for non-loopback Host; empty = no verification (loopback only, MITM risk on remote).
 }
 
 type Session interface {
