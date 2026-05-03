@@ -71,6 +71,10 @@ func Listen(
 		host = "127.0.0.1"
 	}
 
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return fmt.Errorf("Host must not include a port: %q", host)
+	}
+
 	if conf.Password == "" && !isLoopback(host) {
 		return fmt.Errorf("refusing to start with empty Password on non-loopback host %q; set Password or bind to loopback", host)
 	}
@@ -158,9 +162,6 @@ func (w *sessionWrapper) Write(p []byte) (int, error) { return w.s.Write(p) }
 func (w *sessionWrapper) Stderr() io.Writer            { return w.s.Stderr() }
 
 func isLoopback(host string) bool {
-	if host == "localhost" {
-		return true
-	}
 	if ip := net.ParseIP(host); ip != nil {
 		return ip.IsLoopback()
 	}
