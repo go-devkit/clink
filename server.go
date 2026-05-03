@@ -2,6 +2,7 @@ package clink
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -103,7 +104,7 @@ func Listen(
 
 	if conf.Password != "" {
 		opts = append(opts, wish.WithPasswordAuth(func(_ ssh.Context, pass string) bool {
-			return pass == conf.Password
+			return subtle.ConstantTimeCompare([]byte(pass), []byte(conf.Password)) == 1
 		}))
 	} else {
 		opts = append(opts, wish.WithPublicKeyAuth(func(_ ssh.Context, _ ssh.PublicKey) bool {
