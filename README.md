@@ -8,7 +8,7 @@ One binary, two modes: the daemon runs endlessly (`serve`), and subsequent invoc
 
 ```go
 type Config struct {
-    Host     string // server defaults to "127.0.0.1", client to "localhost"
+    Host     string // defaults to "127.0.0.1" on both server and client
     Port     int
     Password string // optional; empty disables auth (loopback only; not safe on multi-user hosts)
 
@@ -95,7 +95,7 @@ cmd := &cli.Command{
         return ctx, cli.Exit("", 0) // prevent local execution
     },
     Flags: []cli.Flag{
-        &cli.StringFlag{Name: "host", Value: "localhost"},
+        &cli.StringFlag{Name: "host", Value: "127.0.0.1"},
         &cli.IntFlag{Name: "port", Value: 2222},
         &cli.StringFlag{Name: "password"},
     },
@@ -164,7 +164,7 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-    rootCmd.PersistentFlags().String("host", "localhost", "daemon host")
+    rootCmd.PersistentFlags().String("host", "127.0.0.1", "daemon host")
     rootCmd.PersistentFlags().Int("port", 2222, "daemon port")
     rootCmd.PersistentFlags().String("password", "", "daemon password")
 }

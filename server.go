@@ -18,9 +18,9 @@ import (
 
 // Config holds the connection settings for Listen and Connect.
 //
-// Host defaults to "127.0.0.1" on the server (Listen) and "localhost" on the
-// client (Connect). Setting Host to "" keeps Listen bound to loopback only,
-// which is the safe default for a local daemon.
+// Host defaults to "127.0.0.1" on both server (Listen) and client (Connect).
+// Setting Host to "" keeps Listen bound to loopback only, which is the safe
+// default for a local daemon.
 //
 // Password is optional. When empty, Listen accepts any public key and Connect
 // authenticates with an ephemeral in-memory key — effectively no auth. Listen
