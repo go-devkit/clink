@@ -83,17 +83,9 @@ func Listen(
 		return newTUI()
 	}
 
-	host := conf.Host
-	if host == "" {
-		host = "127.0.0.1"
-	}
-
-	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
-		host = host[1 : len(host)-1]
-	}
-
-	if _, _, err := net.SplitHostPort(host); err == nil {
-		return fmt.Errorf("Host must not include a port: %q", host)
+	host, err := normalizeHost(conf.Host)
+	if err != nil {
+		return err
 	}
 
 	if conf.Password == "" && !isLoopback(host) {
@@ -181,6 +173,22 @@ type sessionWrapper struct {
 func (w *sessionWrapper) Read(p []byte) (int, error)  { return w.s.Read(p) }
 func (w *sessionWrapper) Write(p []byte) (int, error) { return w.s.Write(p) }
 func (w *sessionWrapper) Stderr() io.Writer            { return w.s.Stderr() }
+
+// normalizeHost applies the shared Host handling for Listen and Connect:
+// defaulting empty to 127.0.0.1, trimming a single pair of IPv6 brackets,
+// and rejecting host:port forms.
+func normalizeHost(host string) (string, error) {
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return "", fmt.Errorf("Host must not include a port: %q", host)
+	}
+	return host, nil
+}
 
 func isLoopback(host string) bool {
 	ip := net.ParseIP(host)

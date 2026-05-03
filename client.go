@@ -15,13 +15,9 @@ import (
 // Connect sends args to the running daemon.
 // If args is empty, it opens an interactive TUI session.
 func Connect(conf Config, args []string) error {
-	host := conf.Host
-	if host == "" {
-		host = "127.0.0.1"
-	}
-
-	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
-		host = host[1 : len(host)-1]
+	host, err := normalizeHost(conf.Host)
+	if err != nil {
+		return err
 	}
 
 	if len(conf.HostPublicKey) == 0 && !isLoopback(host) {
