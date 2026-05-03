@@ -15,6 +15,14 @@ type Config struct {
     HostKeyPEM    []byte // server: optional persisted SSH host private key (PEM). Empty = ephemeral per Listen.
     HostPublicKey []byte // client: pinned host public key (authorized_keys format). Required for non-loopback Host; empty = no verification (loopback only, MITM risk on remote).
 }
+```
+
+> **Note:** Host is checked as a literal IP. Hostnames (e.g. `"localhost"`) are
+> treated as non-loopback — Listen rejects them when Password is empty, and
+> Connect rejects them when HostPublicKey is empty. Use a literal loopback IP
+> (e.g. `127.0.0.1`) or set Password / HostPublicKey explicitly.
+
+```go
 
 type Session interface {
     io.Reader

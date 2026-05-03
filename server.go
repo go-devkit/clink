@@ -184,6 +184,9 @@ func normalizeHost(host string) (string, error) {
 	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
 		host = host[1 : len(host)-1]
 	}
+	if host == "" {
+		return "", fmt.Errorf("Host must not be empty after normalization")
+	}
 	if _, _, err := net.SplitHostPort(host); err == nil {
 		return "", fmt.Errorf("Host must not include a port: %q", host)
 	}
