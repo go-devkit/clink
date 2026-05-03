@@ -22,9 +22,10 @@ import (
 // which is the safe default for a local daemon.
 //
 // Password is optional. When empty, Listen accepts any public key and Connect
-// authenticates with an ephemeral in-memory key — suitable for loopback-only
-// daemons where filesystem/network perms already gate access. Listen returns
-// an error if Password is empty and Host does not resolve to loopback.
+// authenticates with an ephemeral in-memory key — effectively no auth. Listen
+// returns an error if Password is empty and Host does not resolve to loopback.
+// On shared hosts any local user or process that can reach the loopback port
+// can connect; set Password when running on multi-user machines.
 type Config struct {
 	Host     string
 	Port     int
@@ -71,7 +72,7 @@ func Listen(
 	}
 
 	if conf.Password == "" && !isLoopback(host) {
-		return fmt.Errorf("clink: refusing to start with empty Password on non-loopback host %q; set Password or bind to loopback", host)
+		return fmt.Errorf("refusing to start with empty Password on non-loopback host %q; set Password or bind to loopback", host)
 	}
 
 	opts := []ssh.Option{
