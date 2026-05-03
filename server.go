@@ -2,10 +2,14 @@ package clink
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strconv"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/keygen"
@@ -15,10 +19,32 @@ import (
 )
 
 // Config holds the connection settings for Listen and Connect.
+//
+// Host defaults to "127.0.0.1" on both server (Listen) and client (Connect).
+// Setting Host to "" keeps Listen bound to loopback only, which is the safe
+// default for a local daemon.
+//
+// Password is optional. When empty, Listen accepts any public key and Connect
+// authenticates with an ephemeral in-memory key — effectively no auth. Listen
+// returns an error if Password is empty and Host is not a literal loopback IP
+// (e.g. 127.0.0.1, ::1); hostnames are rejected to avoid DNS-dependent safety
+// checks. On shared hosts any local user or process that can reach the loopback
+// port can connect; set Password when running on multi-user machines.
 type Config struct {
-	Host     string // used by Connect only; defaults to "localhost"
+	Host     string
 	Port     int
 	Password string
+
+	// HostKeyPEM (server) is an optional PEM-encoded private key used as the
+	// daemon's SSH host key. When empty, Listen generates an ephemeral key on
+	// each start; clients then cannot pin the host key across restarts.
+	HostKeyPEM []byte
+
+	// HostPublicKey (client) is an SSH public key in authorized_keys format
+	// that Connect uses to verify the daemon's host key, preventing MITM.
+	// Required when Host is not a literal loopback IP; empty disables
+	// verification (loopback only).
+	HostPublicKey []byte
 }
 
 // Session provides I/O for command handlers.
@@ -43,9 +69,13 @@ func Listen(
 	ctx context.Context, conf Config,
 	handler Handler, newTUI func() (tea.Model, []tea.ProgramOption),
 ) error {
-	k, err := keygen.New("", keygen.WithKeyType(keygen.Ed25519))
-	if err != nil {
-		return fmt.Errorf("failed to generate host key: %w", err)
+	hostKeyPEM := conf.HostKeyPEM
+	if len(hostKeyPEM) == 0 {
+		k, err := keygen.New("", keygen.WithKeyType(keygen.Ed25519))
+		if err != nil {
+			return fmt.Errorf("failed to generate host key: %w", err)
+		}
+		hostKeyPEM = k.RawPrivateKey()
 	}
 
 	tuiHandler := func(s ssh.Session) (tea.Model, []tea.ProgramOption) {
@@ -55,17 +85,37 @@ func Listen(
 		return newTUI()
 	}
 
-	s, err := wish.NewServer(
-		wish.WithAddress(":"+strconv.Itoa(conf.Port)),
-		wish.WithHostKeyPEM(k.RawPrivateKey()),
-		wish.WithPasswordAuth(func(ctx ssh.Context, pass string) bool {
-			return pass == conf.Password
-		}),
+	host, err := normalizeHost(conf.Host)
+	if err != nil {
+		return err
+	}
+
+	if conf.Password == "" && !isLoopback(host) {
+		return fmt.Errorf("refusing to start with empty Password on non-loopback host %q (hostnames are treated as non-loopback); set Password or bind to a literal loopback IP (e.g. 127.0.0.1)", host)
+	}
+
+	opts := []ssh.Option{
+		wish.WithAddress(net.JoinHostPort(host, strconv.Itoa(conf.Port))),
+		wish.WithHostKeyPEM(hostKeyPEM),
 		wish.WithMiddleware(
 			bubbletea.Middleware(tuiHandler),
 			handleCLI(ctx, handler),
 		),
-	)
+	}
+
+	if conf.Password != "" {
+		expected := sha256.Sum256([]byte(conf.Password))
+		opts = append(opts, wish.WithPasswordAuth(func(_ ssh.Context, pass string) bool {
+			got := sha256.Sum256([]byte(pass))
+			return subtle.ConstantTimeCompare(got[:], expected[:]) == 1
+		}))
+	} else {
+		opts = append(opts, wish.WithPublicKeyAuth(func(_ ssh.Context, _ ssh.PublicKey) bool {
+			return true
+		}))
+	}
+
+	s, err := wish.NewServer(opts...)
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
 	}
@@ -127,6 +177,30 @@ type sessionWrapper struct {
 func (w *sessionWrapper) Read(p []byte) (int, error)  { return w.s.Read(p) }
 func (w *sessionWrapper) Write(p []byte) (int, error) { return w.s.Write(p) }
 func (w *sessionWrapper) Stderr() io.Writer            { return w.s.Stderr() }
+
+// normalizeHost applies the shared Host handling for Listen and Connect:
+// defaulting empty to 127.0.0.1, trimming a single pair of IPv6 brackets,
+// and rejecting host:port forms.
+func normalizeHost(host string) (string, error) {
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	if host == "" {
+		return "", fmt.Errorf("host must not be empty after normalization")
+	}
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return "", fmt.Errorf("host must not include a port: %q", host)
+	}
+	return host, nil
+}
+
+func isLoopback(host string) bool {
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
 
 type quitTea struct{}
 

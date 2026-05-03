@@ -8,10 +8,21 @@ One binary, two modes: the daemon runs endlessly (`serve`), and subsequent invoc
 
 ```go
 type Config struct {
-    Host     string // client only; defaults to "localhost"
+    Host     string // defaults to "127.0.0.1" on both server and client
     Port     int
-    Password string
+    Password string // optional; empty disables auth (loopback only; not safe on multi-user hosts)
+
+    HostKeyPEM    []byte // server: optional persisted SSH host private key (PEM). Empty = ephemeral per Listen.
+    HostPublicKey []byte // client: pinned host public key (authorized_keys format). Required for non-loopback Host; empty = no verification (loopback only, MITM risk on remote).
 }
+```
+
+> **Note:** Host is checked as a literal IP. Hostnames (e.g. `"localhost"`) are
+> treated as non-loopback — Listen rejects them when Password is empty, and
+> Connect rejects them when HostPublicKey is empty. Use a literal loopback IP
+> (e.g. `127.0.0.1`) or set Password / HostPublicKey explicitly.
+
+```go
 
 type Session interface {
     io.Reader
@@ -92,7 +103,7 @@ cmd := &cli.Command{
         return ctx, cli.Exit("", 0) // prevent local execution
     },
     Flags: []cli.Flag{
-        &cli.StringFlag{Name: "host", Value: "localhost"},
+        &cli.StringFlag{Name: "host", Value: "127.0.0.1"},
         &cli.IntFlag{Name: "port", Value: 2222},
         &cli.StringFlag{Name: "password"},
     },
@@ -161,7 +172,7 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-    rootCmd.PersistentFlags().String("host", "localhost", "daemon host")
+    rootCmd.PersistentFlags().String("host", "127.0.0.1", "daemon host")
     rootCmd.PersistentFlags().Int("port", 2222, "daemon port")
     rootCmd.PersistentFlags().String("password", "", "daemon password")
 }
