@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/go-devkit/clink"
 	"github.com/urfave/cli/v3"
 )
@@ -140,7 +140,7 @@ func (m tuiModel) Init() tea.Cmd {
 
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if msg.String() == "q" || msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
@@ -152,6 +152,6 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m tuiModel) View() string {
-	return fmt.Sprintf("Test TUI (%dx%d) — keypresses: %d\n\nPress 'q' to quit.", m.width, m.height, m.keys)
+func (m tuiModel) View() tea.View {
+	return tea.NewView(fmt.Sprintf("Test TUI (%dx%d) — keypresses: %d\n\nPress 'q' to quit.", m.width, m.height, m.keys))
 }

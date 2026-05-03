@@ -11,11 +11,11 @@ import (
 	"strconv"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/wish/v2"
+	"charm.land/wish/v2/bubbletea"
 	"github.com/charmbracelet/keygen"
 	"github.com/charmbracelet/ssh"
-	"github.com/charmbracelet/wish"
-	"github.com/charmbracelet/wish/bubbletea"
 )
 
 // Config holds the connection settings for Listen and Connect.
@@ -212,6 +212,6 @@ func (qt quitTea) Update(_ tea.Msg) (tea.Model, tea.Cmd) {
 	return qt, tea.Quit
 }
 
-func (quitTea) View() string {
-	return ""
+func (quitTea) View() tea.View {
+	return tea.NewView("")
 }
