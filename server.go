@@ -2,6 +2,7 @@ package clink
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -90,7 +91,7 @@ func Listen(
 	}
 
 	if conf.Password == "" && !isLoopback(host) {
-		return fmt.Errorf("refusing to start with empty Password on non-loopback host %q; set Password or bind to a literal loopback IP (e.g. 127.0.0.1)", host)
+		return fmt.Errorf("refusing to start with empty Password on non-loopback host %q (hostnames are treated as non-loopback); set Password or bind to a literal loopback IP (e.g. 127.0.0.1)", host)
 	}
 
 	opts := []ssh.Option{
@@ -103,8 +104,10 @@ func Listen(
 	}
 
 	if conf.Password != "" {
+		expected := sha256.Sum256([]byte(conf.Password))
 		opts = append(opts, wish.WithPasswordAuth(func(_ ssh.Context, pass string) bool {
-			return subtle.ConstantTimeCompare([]byte(pass), []byte(conf.Password)) == 1
+			got := sha256.Sum256([]byte(pass))
+			return subtle.ConstantTimeCompare(got[:], expected[:]) == 1
 		}))
 	} else {
 		opts = append(opts, wish.WithPublicKeyAuth(func(_ ssh.Context, _ ssh.PublicKey) bool {

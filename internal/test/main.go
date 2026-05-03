@@ -38,7 +38,7 @@ func main() {
 			return ctx, cli.Exit("", 0)
 		},
 		Flags: []cli.Flag{
-			&cli.StringFlag{Name: "host", Value: "localhost"},
+			&cli.StringFlag{Name: "host", Value: "127.0.0.1"},
 			&cli.IntFlag{Name: "port", Value: 2222},
 			&cli.StringFlag{Name: "password", Value: "test"},
 		},
