@@ -91,7 +91,7 @@ func propagateWriter(s clink.Session, cmd *cli.Command) {
 }
 
 func newTUI() (tea.Model, []tea.ProgramOption) {
-	return tuiModel{}, []tea.ProgramOption{tea.WithAltScreen()}
+	return tuiModel{}, nil
 }
 
 func commands() []*cli.Command {
@@ -153,5 +153,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m tuiModel) View() tea.View {
-	return tea.NewView(fmt.Sprintf("Test TUI (%dx%d) — keypresses: %d\n\nPress 'q' to quit.", m.width, m.height, m.keys))
+	v := tea.NewView(fmt.Sprintf("Test TUI (%dx%d) — keypresses: %d\n\nPress 'q' to quit.", m.width, m.height, m.keys))
+	v.AltScreen = true
+	return v
 }
