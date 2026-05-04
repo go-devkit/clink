@@ -619,6 +619,32 @@ func TestExitErrorPropagatesCustomCode(t *testing.T) {
 	}
 }
 
+func TestExitErrorPreservesWrapMessage(t *testing.T) {
+	handler := func(_ context.Context, _ Session, _ []string) error {
+		return fmt.Errorf("load config: %w", &ExitError{Code: 2, Err: errors.New("io")})
+	}
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	c := dialSSH(t, conf, gossh.Password("pw"))
+	defer c.Close()
+	sess, err := c.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	var stderr strings.Builder
+	sess.Stderr = &stderr
+	err = sess.Run("x")
+	var exitErr *gossh.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitStatus() != 2 {
+		t.Fatalf("expected exit 2, got %v", err)
+	}
+	if !strings.Contains(stderr.String(), "load config:") {
+		t.Errorf("wrap prefix lost in stderr: %q", stderr.String())
+	}
+}
+
 func TestExitErrorSilentNoMessage(t *testing.T) {
 	handler := func(_ context.Context, _ Session, _ []string) error {
 		return &ExitError{Code: 7}
@@ -681,9 +707,17 @@ func TestSessionContextCancelsOnDisconnect(t *testing.T) {
 	}
 }
 
-func TestNoTUINoCommandClosesSession(t *testing.T) {
-	handler := func(_ context.Context, _ Session, _ []string) error { return nil }
-	conf, stop := startServer(t, "pw", nil, handler) // newTUI nil (startServer passes nil)
+// TestNoTUIInteractiveSessionClosesCleanly mirrors what Connect does on the
+// public empty-args path: request a PTY then a shell. With newTUI=nil the
+// server must not invoke the CLI handler; the session must close cleanly via
+// the no-op TUI.
+func TestNoTUIInteractiveSessionClosesCleanly(t *testing.T) {
+	var handlerCalled bool
+	handler := func(_ context.Context, _ Session, args []string) error {
+		handlerCalled = true
+		return fmt.Errorf("handler must not be called, got args=%v", args)
+	}
+	conf, stop := startServer(t, "pw", nil, handler) // newTUI nil
 	defer stop()
 
 	c := dialSSH(t, conf, gossh.Password("pw"))
@@ -694,11 +728,21 @@ func TestNoTUINoCommandClosesSession(t *testing.T) {
 	}
 	defer sess.Close()
 
+	if err := sess.RequestPty("xterm-256color", 24, 80, gossh.TerminalModes{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Shell(); err != nil {
+		t.Fatal(err)
+	}
+
 	done := make(chan error, 1)
-	go func() { done <- sess.Run("") }() // empty command
+	go func() { done <- sess.Wait() }()
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
-		t.Fatal("session with no command and no TUI did not close")
+		t.Fatal("interactive session with newTUI=nil did not close")
+	}
+	if handlerCalled {
+		t.Fatal("CLI handler was invoked for an interactive (shell) session")
 	}
 }

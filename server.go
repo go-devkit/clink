@@ -103,19 +103,20 @@ func Listen(
 		return fmt.Errorf("refusing to start with empty Password on non-loopback host %q (hostnames are treated as non-loopback); set Password or bind to a literal loopback IP (e.g. 127.0.0.1)", host)
 	}
 
-	mws := []wish.Middleware{}
-	if newTUI != nil {
-		tuiHandler := func(s ssh.Session) (tea.Model, []tea.ProgramOption) {
-			return newTUI()
+	tuiHandler := func(s ssh.Session) (tea.Model, []tea.ProgramOption) {
+		if newTUI == nil {
+			return quitTea{}, nil
 		}
-		mws = append(mws, bubbletea.Middleware(tuiHandler))
+		return newTUI()
 	}
-	mws = append(mws, handleCLI(ctx, handler, newTUI != nil))
 
 	opts := []ssh.Option{
 		wish.WithAddress(net.JoinHostPort(host, strconv.Itoa(conf.Port))),
 		wish.WithHostKeyPEM(hostKeyPEM),
-		wish.WithMiddleware(mws...),
+		wish.WithMiddleware(
+			bubbletea.Middleware(tuiHandler),
+			handleCLI(ctx, handler),
+		),
 	}
 
 	if conf.Password != "" {
@@ -155,7 +156,7 @@ func Listen(
 	}
 }
 
-func handleCLI(parent context.Context, handler Handler, hasTUI bool) wish.Middleware {
+func handleCLI(parent context.Context, handler Handler) wish.Middleware {
 	return func(next ssh.Handler) ssh.Handler {
 		return func(s ssh.Session) {
 			args := s.Command()
@@ -165,9 +166,6 @@ func handleCLI(parent context.Context, handler Handler, hasTUI bool) wish.Middle
 			}
 
 			if len(args) < 1 {
-				if !hasTUI {
-					return
-				}
 				next(s)
 				return
 			}
@@ -196,9 +194,7 @@ func handleCLI(parent context.Context, handler Handler, hasTUI bool) wish.Middle
 			var exit *ExitError
 			if errors.As(err, &exit) {
 				code = exit.Code
-				if exit.Err != nil {
-					msg = exit.Err.Error()
-				} else {
+				if direct, ok := err.(*ExitError); ok && direct.Err == nil {
 					msg = ""
 				}
 			}
@@ -242,5 +238,17 @@ func normalizeHost(host string) (string, error) {
 func isLoopback(host string) bool {
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+type quitTea struct{}
+
+func (quitTea) Init() tea.Cmd { return nil }
+
+func (qt quitTea) Update(_ tea.Msg) (tea.Model, tea.Cmd) {
+	return qt, tea.Quit
+}
+
+func (quitTea) View() tea.View {
+	return tea.NewView("")
 }
 
