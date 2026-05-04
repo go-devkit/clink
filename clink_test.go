@@ -413,7 +413,11 @@ func TestConnectHostPublicKeyAccepts(t *testing.T) {
 	clientConf := conf
 	clientConf.HostPublicKey = k.RawAuthorizedKey()
 
-	stdoutR, stdoutW, _ := os.Pipe()
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { stdoutR.Close(); stdoutW.Close() })
 	origIn, origOut, origErr := os.Stdin, os.Stdout, os.Stderr
 	os.Stdout = stdoutW
 	t.Cleanup(func() { os.Stdin, os.Stdout, os.Stderr = origIn, origOut, origErr })
