@@ -135,18 +135,26 @@ func startServer(t *testing.T, password string, hostKeyPEM []byte, handler Handl
 	go func() { done <- Listen(ctx, conf, handler, nil) }()
 
 	deadline := time.Now().Add(3 * time.Second)
+	var ready bool
+	var lastErr error
 	for time.Now().Before(deadline) {
 		c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 100*time.Millisecond)
 		if err == nil {
 			c.Close()
+			ready = true
 			break
 		}
+		lastErr = err
 		select {
 		case err := <-done:
 			t.Fatalf("Listen exited early: %v", err)
 		default:
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+	if !ready {
+		cancel()
+		t.Fatalf("server did not become ready within deadline: %v", lastErr)
 	}
 
 	stop := func() {
@@ -532,14 +540,17 @@ func TestConnectStdinPiping(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { stdinR.Close(); stdinW.Close() })
 	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { stdoutR.Close(); stdoutW.Close() })
 	stderrR, stderrW, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { stderrR.Close(); stderrW.Close() })
 
 	origIn, origOut, origErr := os.Stdin, os.Stdout, os.Stderr
 	os.Stdin, os.Stdout, os.Stderr = stdinR, stdoutW, stderrW
