@@ -32,6 +32,11 @@ type Session interface {
 
 type Handler func(ctx context.Context, s Session, args []string) error
 
+// Return ErrNotHandled to fall through to the TUI.
+// Return *ExitError to set a custom remote exit code:
+//   return &clink.ExitError{Code: 2, Err: err}
+// ctx is cancelled when the client disconnects.
+
 // Daemon side: listen for incoming commands and TUI sessions.
 // Pass nil for newTUI if no TUI is needed.
 clink.Listen(ctx, conf, handler, newTUI)
