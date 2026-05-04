@@ -362,6 +362,150 @@ func TestStdinPipingViaSSH(t *testing.T) {
 	}
 }
 
+func TestHandleCLIStripsLeadingDoubleDash(t *testing.T) {
+	var got []string
+	handler := func(_ context.Context, s Session, args []string) error {
+		got = args
+		fmt.Fprint(s, "ok")
+		return nil
+	}
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	c := dialSSH(t, conf, gossh.Password("pw"))
+	defer c.Close()
+	sess, err := c.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	if _, err := sess.Output("-- greet world"); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "greet" || got[1] != "world" {
+		t.Fatalf("args = %q, want [greet world]", got)
+	}
+}
+
+func TestConnectHostPublicKeyAccepts(t *testing.T) {
+	osStdMu.Lock()
+	defer osStdMu.Unlock()
+
+	k, err := keygen.New("", keygen.WithKeyType(keygen.Ed25519))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := func(_ context.Context, s Session, _ []string) error {
+		fmt.Fprint(s, "verified")
+		return nil
+	}
+	conf, stop := startServer(t, "pw", k.RawPrivateKey(), handler)
+	defer stop()
+
+	clientConf := conf
+	clientConf.HostPublicKey = k.RawAuthorizedKey()
+
+	stdoutR, stdoutW, _ := os.Pipe()
+	origIn, origOut, origErr := os.Stdin, os.Stdout, os.Stderr
+	os.Stdout = stdoutW
+	t.Cleanup(func() { os.Stdin, os.Stdout, os.Stderr = origIn, origOut, origErr })
+
+	if err := Connect(clientConf, []string{"x"}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	stdoutW.Close()
+	out, _ := io.ReadAll(stdoutR)
+	if string(out) != "verified" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+func TestConnectHostPublicKeyMismatchRejects(t *testing.T) {
+	handler := func(_ context.Context, _ Session, _ []string) error { return nil }
+	conf, stop := startServer(t, "pw", nil, handler) // ephemeral host key
+	defer stop()
+
+	other, err := keygen.New("", keygen.WithKeyType(keygen.Ed25519))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientConf := conf
+	clientConf.HostPublicKey = other.RawAuthorizedKey()
+
+	err = Connect(clientConf, []string{"x"})
+	if err == nil {
+		t.Fatal("expected host key mismatch error")
+	}
+}
+
+func TestConnectHostPublicKeyParseError(t *testing.T) {
+	err := Connect(Config{Host: "127.0.0.1", Port: 1, HostPublicKey: []byte("not a key")}, []string{"x"})
+	if err == nil || !strings.Contains(err.Error(), "parse HostPublicKey") {
+		t.Fatalf("expected parse error, got %v", err)
+	}
+}
+
+func TestListenBadHostKeyPEM(t *testing.T) {
+	err := Listen(context.Background(), Config{
+		Host:       "127.0.0.1",
+		Port:       freePort(t),
+		Password:   "pw",
+		HostKeyPEM: []byte("not a pem key"),
+	}, nil, nil)
+	if err == nil {
+		t.Fatal("expected error from bad HostKeyPEM")
+	}
+}
+
+func TestConcurrentSessions(t *testing.T) {
+	var n int
+	var mu sync.Mutex
+	handler := func(_ context.Context, s Session, args []string) error {
+		mu.Lock()
+		n++
+		mu.Unlock()
+		fmt.Fprint(s, args[0])
+		return nil
+	}
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	c := dialSSH(t, conf, gossh.Password("pw"))
+	defer c.Close()
+
+	const N = 8
+	var wg sync.WaitGroup
+	wg.Add(N)
+	errs := make(chan error, N)
+	for i := 0; i < N; i++ {
+		go func(i int) {
+			defer wg.Done()
+			sess, err := c.NewSession()
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer sess.Close()
+			out, err := sess.Output(fmt.Sprintf("cmd%d", i))
+			if err != nil {
+				errs <- err
+				return
+			}
+			if string(out) != fmt.Sprintf("cmd%d", i) {
+				errs <- fmt.Errorf("got %q", out)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	if n != N {
+		t.Errorf("handler invoked %d times, want %d", n, N)
+	}
+}
+
 // TestConnectStdinPiping covers the same behavior through the public Connect
 // API, swapping os.Stdin/Stdout/Stderr with pipes. Not parallel-safe.
 var osStdMu sync.Mutex
