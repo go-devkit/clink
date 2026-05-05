@@ -99,7 +99,10 @@ func Connect(conf Config, args []string) error {
 		return fmt.Errorf("failed to request PTY: %w", err)
 	}
 
-	return session.Run("tui")
+	if err := session.Shell(); err != nil {
+		return fmt.Errorf("failed to start shell: %w", err)
+	}
+	return session.Wait()
 }
 
 // clientAuth returns the SSH auth methods for Connect.

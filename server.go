@@ -63,6 +63,22 @@ type Handler func(ctx context.Context, s Session, args []string) error
 // ErrNotHandled is returned by a Handler to indicate the command was not recognized.
 var ErrNotHandled = errors.New("command not handled")
 
+// ExitError lets a Handler set a custom remote exit code. Wrap or return
+// directly; if Err is non-nil it is written to the session's stderr.
+type ExitError struct {
+	Code int
+	Err  error
+}
+
+func (e *ExitError) Error() string {
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return fmt.Sprintf("exit status %d", e.Code)
+}
+
+func (e *ExitError) Unwrap() error { return e.Err }
+
 // Listen starts the daemon and handles incoming CLI commands and TUI sessions.
 // If newTUI is nil, connections without a command are closed.
 func Listen(
@@ -78,13 +94,6 @@ func Listen(
 		hostKeyPEM = k.RawPrivateKey()
 	}
 
-	tuiHandler := func(s ssh.Session) (tea.Model, []tea.ProgramOption) {
-		if newTUI == nil {
-			return quitTea{}, nil
-		}
-		return newTUI()
-	}
-
 	host, err := normalizeHost(conf.Host)
 	if err != nil {
 		return err
@@ -92,6 +101,13 @@ func Listen(
 
 	if conf.Password == "" && !isLoopback(host) {
 		return fmt.Errorf("refusing to start with empty Password on non-loopback host %q (hostnames are treated as non-loopback); set Password or bind to a literal loopback IP (e.g. 127.0.0.1)", host)
+	}
+
+	tuiHandler := func(s ssh.Session) (tea.Model, []tea.ProgramOption) {
+		if newTUI == nil {
+			return quitTea{}, nil
+		}
+		return newTUI()
 	}
 
 	opts := []ssh.Option{
@@ -140,7 +156,7 @@ func Listen(
 	}
 }
 
-func handleCLI(ctx context.Context, handler Handler) func(next ssh.Handler) ssh.Handler {
+func handleCLI(parent context.Context, handler Handler) wish.Middleware {
 	return func(next ssh.Handler) ssh.Handler {
 		return func(s ssh.Session) {
 			args := s.Command()
@@ -154,17 +170,39 @@ func handleCLI(ctx context.Context, handler Handler) func(next ssh.Handler) ssh.
 				return
 			}
 
-			if err := handler(ctx, &sessionWrapper{s}, args); err != nil {
-				if errors.Is(err, ErrNotHandled) {
-					next(s)
-					return
+			ctx, cancel := context.WithCancel(parent)
+			defer cancel()
+			go func() {
+				select {
+				case <-s.Context().Done():
+					cancel()
+				case <-ctx.Done():
 				}
+			}()
 
-				fmt.Fprintf(s.Stderr(), "%v\n", err)
-				if err := s.Exit(1); err != nil {
-					fmt.Fprintf(s.Stderr(), "%v\n", err)
-				}
+			err := handler(ctx, &sessionWrapper{s}, args)
+			if err == nil {
 				return
+			}
+			if errors.Is(err, ErrNotHandled) {
+				next(s)
+				return
+			}
+
+			code := 1
+			msg := err.Error()
+			var exit *ExitError
+			if errors.As(err, &exit) {
+				code = exit.Code
+				if direct, ok := err.(*ExitError); ok && direct.Err == nil {
+					msg = ""
+				}
+			}
+			if msg != "" {
+				fmt.Fprintf(s.Stderr(), "%v\n", msg)
+			}
+			if err := s.Exit(code); err != nil {
+				fmt.Fprintf(s.Stderr(), "%v\n", err)
 			}
 		}
 	}
@@ -204,9 +242,7 @@ func isLoopback(host string) bool {
 
 type quitTea struct{}
 
-func (quitTea) Init() tea.Cmd {
-	return nil
-}
+func (quitTea) Init() tea.Cmd { return nil }
 
 func (qt quitTea) Update(_ tea.Msg) (tea.Model, tea.Cmd) {
 	return qt, tea.Quit
@@ -215,3 +251,4 @@ func (qt quitTea) Update(_ tea.Msg) (tea.Model, tea.Cmd) {
 func (quitTea) View() tea.View {
 	return tea.NewView("")
 }
+
