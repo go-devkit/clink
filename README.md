@@ -32,10 +32,12 @@ type Session interface {
 
 type Handler func(ctx context.Context, s Session, args []string) error
 
-// Return ErrNotHandled to fall through to the TUI.
+// Return ErrNotHandled if the command is unknown; the session closes.
 // Return *ExitError to set a custom remote exit code:
 //   return &clink.ExitError{Code: 2, Err: err}
 // ctx is cancelled when the client disconnects.
+// Interactive (no-args) clients open a TUI directly via SSH shell —
+// they never reach Handler.
 
 // Daemon side: listen for incoming commands and TUI sessions.
 // Pass nil for newTUI if no TUI is needed.
