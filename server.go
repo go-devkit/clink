@@ -79,10 +79,11 @@ func (e *ExitError) Error() string {
 
 func (e *ExitError) Unwrap() error { return e.Err }
 
-// Interactive is returned by a Handler to launch a Bubble Tea TUI for the
-// current command. The client must have requested a PTY (use clink.WithPTY
-// when calling Connect); otherwise the session exits with code 1 and a
-// stderr message.
+// Interactive is returned by a Handler to launch a Bubble Tea TUI.
+// For empty-args sessions a PTY is already allocated via the SSH shell
+// request. For non-empty subcommands, the client must opt into a PTY by
+// calling Connect with clink.WithPTY(); otherwise the session exits with
+// code 1 and a stderr message.
 type Interactive struct {
 	Model tea.Model
 	Opts  []tea.ProgramOption
@@ -110,6 +111,10 @@ func Listen(ctx context.Context, conf Config, handler Handler) error {
 
 	if conf.Password == "" && !isLoopback(host) {
 		return fmt.Errorf("refusing to start with empty Password on non-loopback host %q (hostnames are treated as non-loopback); set Password or bind to a literal loopback IP (e.g. 127.0.0.1)", host)
+	}
+
+	if handler == nil {
+		return errors.New("clink: Listen called with nil handler")
 	}
 
 	opts := []ssh.Option{
@@ -243,6 +248,11 @@ func isLoopback(host string) bool {
 // runInteractive runs a tea.Program for an Interactive command. The session
 // must already have a PTY allocated (the client used WithPTY).
 func runInteractive(s ssh.Session, i *Interactive) {
+	if i == nil || i.Model == nil {
+		fmt.Fprintln(s.Stderr(), "clink: Handler returned a nil Interactive or Model")
+		_ = s.Exit(1)
+		return
+	}
 	_, winch, ok := s.Pty()
 	if !ok {
 		fmt.Fprintln(s.Stderr(), "clink: interactive command requires a PTY (use clink.WithPTY)")
@@ -258,7 +268,10 @@ func runInteractive(s ssh.Session, i *Interactive) {
 			case <-ctx.Done():
 				p.Quit()
 				return
-			case w := <-winch:
+			case w, ok := <-winch:
+				if !ok {
+					return
+				}
 				p.Send(tea.WindowSizeMsg{Width: w.Width, Height: w.Height})
 			}
 		}

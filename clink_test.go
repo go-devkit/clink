@@ -458,6 +458,13 @@ func TestConnectHostPublicKeyParseError(t *testing.T) {
 	}
 }
 
+func TestListenRejectsNilHandler(t *testing.T) {
+	err := Listen(context.Background(), Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "nil handler") {
+		t.Fatalf("expected nil-handler error, got %v", err)
+	}
+}
+
 func TestListenBadHostKeyPEM(t *testing.T) {
 	err := Listen(context.Background(), Config{
 		Host:       "127.0.0.1",
