@@ -79,12 +79,21 @@ func (e *ExitError) Error() string {
 
 func (e *ExitError) Unwrap() error { return e.Err }
 
+// Interactive is returned by a Handler to launch a Bubble Tea TUI for the
+// current command. The client must have requested a PTY (use clink.WithPTY
+// when calling Connect); otherwise the session exits with code 1 and a
+// stderr message.
+type Interactive struct {
+	Model tea.Model
+	Opts  []tea.ProgramOption
+}
+
+func (*Interactive) Error() string { return "clink: interactive session" }
+
 // Listen starts the daemon and handles incoming CLI commands and TUI sessions.
-// If newTUI is nil, connections without a command are closed.
-func Listen(
-	ctx context.Context, conf Config,
-	handler Handler, newTUI func() (tea.Model, []tea.ProgramOption),
-) error {
+// Handler receives empty args for interactive (no-args) clients and can return
+// *Interactive to launch a TUI for them — same mechanism as subcommand TUIs.
+func Listen(ctx context.Context, conf Config, handler Handler) error {
 	hostKeyPEM := conf.HostKeyPEM
 	if len(hostKeyPEM) == 0 {
 		k, err := keygen.New("", keygen.WithKeyType(keygen.Ed25519))
@@ -103,20 +112,10 @@ func Listen(
 		return fmt.Errorf("refusing to start with empty Password on non-loopback host %q (hostnames are treated as non-loopback); set Password or bind to a literal loopback IP (e.g. 127.0.0.1)", host)
 	}
 
-	tuiHandler := func(s ssh.Session) (tea.Model, []tea.ProgramOption) {
-		if newTUI == nil {
-			return quitTea{}, nil
-		}
-		return newTUI()
-	}
-
 	opts := []ssh.Option{
 		wish.WithAddress(net.JoinHostPort(host, strconv.Itoa(conf.Port))),
 		wish.WithHostKeyPEM(hostKeyPEM),
-		wish.WithMiddleware(
-			bubbletea.Middleware(tuiHandler),
-			handleCLI(ctx, handler),
-		),
+		wish.WithMiddleware(handleCLI(ctx, handler)),
 	}
 
 	if conf.Password != "" {
@@ -165,11 +164,6 @@ func handleCLI(parent context.Context, handler Handler) wish.Middleware {
 				args = args[1:]
 			}
 
-			if len(args) < 1 {
-				next(s)
-				return
-			}
-
 			ctx, cancel := context.WithCancel(parent)
 			defer cancel()
 			go func() {
@@ -186,6 +180,12 @@ func handleCLI(parent context.Context, handler Handler) wish.Middleware {
 			}
 			if errors.Is(err, ErrNotHandled) {
 				next(s)
+				return
+			}
+
+			var inter *Interactive
+			if errors.As(err, &inter) {
+				runInteractive(s, inter)
 				return
 			}
 
@@ -240,15 +240,31 @@ func isLoopback(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-type quitTea struct{}
-
-func (quitTea) Init() tea.Cmd { return nil }
-
-func (qt quitTea) Update(_ tea.Msg) (tea.Model, tea.Cmd) {
-	return qt, tea.Quit
+// runInteractive runs a tea.Program for an Interactive command. The session
+// must already have a PTY allocated (the client used WithPTY).
+func runInteractive(s ssh.Session, i *Interactive) {
+	_, winch, ok := s.Pty()
+	if !ok {
+		fmt.Fprintln(s.Stderr(), "clink: interactive command requires a PTY (use clink.WithPTY)")
+		_ = s.Exit(1)
+		return
+	}
+	p := tea.NewProgram(i.Model, append(i.Opts, bubbletea.MakeOptions(s)...)...)
+	ctx, cancel := context.WithCancel(s.Context())
+	defer cancel()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				p.Quit()
+				return
+			case w := <-winch:
+				p.Send(tea.WindowSizeMsg{Width: w.Width, Height: w.Height})
+			}
+		}
+	}()
+	_, _ = p.Run()
+	p.Kill()
 }
 
-func (quitTea) View() tea.View {
-	return tea.NewView("")
-}
 

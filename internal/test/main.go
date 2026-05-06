@@ -50,7 +50,7 @@ func main() {
 		Usage: "Start the SSH server",
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			fmt.Println("starting server on :2222")
-			return clink.Listen(ctx, defaultConf, newHandler(), newTUI)
+			return clink.Listen(ctx, defaultConf, newHandler())
 		},
 	})
 
@@ -65,6 +65,10 @@ func main() {
 
 func newHandler() clink.Handler {
 	return func(ctx context.Context, s clink.Session, args []string) error {
+		if len(args) == 0 {
+			return &clink.Interactive{Model: tuiModel{}}
+		}
+
 		cmd := &cli.Command{
 			Name:     "testapp",
 			Commands: commands(),
@@ -88,10 +92,6 @@ func propagateWriter(s clink.Session, cmd *cli.Command) {
 	for _, sub := range cmd.Commands {
 		propagateWriter(s, sub)
 	}
-}
-
-func newTUI() (tea.Model, []tea.ProgramOption) {
-	return tuiModel{}, nil
 }
 
 func commands() []*cli.Command {
