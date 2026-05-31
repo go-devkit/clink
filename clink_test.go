@@ -466,14 +466,18 @@ func TestListenRejectsNilHandler(t *testing.T) {
 }
 
 func TestListenBadHostKeyPEM(t *testing.T) {
+	noop := func(_ context.Context, _ Session, _ []string) error { return nil }
 	err := Listen(context.Background(), Config{
 		Host:       "127.0.0.1",
 		Port:       freePort(t),
 		Password:   "pw",
 		HostKeyPEM: []byte("not a pem key"),
-	}, nil)
+	}, noop)
 	if err == nil {
 		t.Fatal("expected error from bad HostKeyPEM")
+	}
+	if strings.Contains(err.Error(), "nil handler") {
+		t.Fatalf("test short-circuited on nil-handler guard: %v", err)
 	}
 }
 
