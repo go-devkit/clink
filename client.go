@@ -12,9 +12,29 @@ import (
 	"golang.org/x/term"
 )
 
+// ConnectOption configures Connect. See WithPTY.
+type ConnectOption func(*connectOpts)
+
+type connectOpts struct {
+	pty bool
+}
+
+// WithPTY makes Connect allocate a PTY for the command session, enabling
+// the server-side Handler to launch an Interactive (Bubble Tea) TUI for
+// that command. Without it, Interactive returns from Handler will fail
+// with an exit-1 message on the server.
+func WithPTY() ConnectOption {
+	return func(o *connectOpts) { o.pty = true }
+}
+
 // Connect sends args to the running daemon.
 // If args is empty, it opens an interactive TUI session.
-func Connect(conf Config, args []string) error {
+func Connect(conf Config, args []string, opts ...ConnectOption) error {
+	var co connectOpts
+	for _, o := range opts {
+		o(&co)
+	}
+
 	host, err := normalizeHost(conf.Host)
 	if err != nil {
 		return err
@@ -52,24 +72,42 @@ func Connect(conf Config, args []string) error {
 	}
 	defer session.Close()
 
-	if len(args) > 0 {
-		session.Stdin = os.Stdin
-		session.Stdout = os.Stdout
-		session.Stderr = os.Stderr
+	session.Stdin = os.Stdin
+	session.Stdout = os.Stdout
+	session.Stderr = os.Stderr
 
-		quoted := make([]string, len(args))
-		for i, arg := range args {
-			quoted[i] = shellQuote(arg)
+	interactive := len(args) == 0 || co.pty
+
+	if interactive {
+		restore, err := setupClientPTY(session)
+		if err != nil {
+			return err
 		}
-		return session.Run(strings.Join(quoted, " "))
+		defer restore()
 	}
 
-	// For interactive/TUI mode, set up terminal and PTY
+	if len(args) == 0 {
+		if err := session.Shell(); err != nil {
+			return fmt.Errorf("failed to start shell: %w", err)
+		}
+		return session.Wait()
+	}
+
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		quoted[i] = shellQuote(arg)
+	}
+	return session.Run(strings.Join(quoted, " "))
+}
+
+// setupClientPTY puts os.Stdin in raw mode and requests a PTY on the SSH
+// session. The returned func restores the terminal state.
+func setupClientPTY(session *ssh.Session) (func(), error) {
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
-		return fmt.Errorf("failed to set raw mode: %w", err)
+		return nil, fmt.Errorf("failed to set raw mode: %w", err)
 	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
+	restore := func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }
 
 	width, height, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil {
@@ -80,10 +118,6 @@ func Connect(conf Config, args []string) error {
 	if termType == "" {
 		termType = "xterm-256color"
 	}
-
-	session.Stdin = os.Stdin
-	session.Stdout = os.Stdout
-	session.Stderr = os.Stderr
 
 	modes := ssh.TerminalModes{
 		ssh.ECHO:          0,
@@ -96,13 +130,10 @@ func Connect(conf Config, args []string) error {
 		ssh.IUTF8:         1,
 	}
 	if err := session.RequestPty(termType, height, width, modes); err != nil {
-		return fmt.Errorf("failed to request PTY: %w", err)
+		restore()
+		return nil, fmt.Errorf("failed to request PTY: %w", err)
 	}
-
-	if err := session.Shell(); err != nil {
-		return fmt.Errorf("failed to start shell: %w", err)
-	}
-	return session.Wait()
+	return restore, nil
 }
 
 // clientAuth returns the SSH auth methods for Connect.

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/keygen"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -87,7 +88,7 @@ func TestShellQuote(t *testing.T) {
 // --- config validation ---
 
 func TestListenRejectsEmptyPasswordOnNonLoopback(t *testing.T) {
-	err := Listen(context.Background(), Config{Host: "8.8.8.8", Port: 0}, nil, nil)
+	err := Listen(context.Background(), Config{Host: "8.8.8.8", Port: 0}, nil)
 	if err == nil || !strings.Contains(err.Error(), "non-loopback") {
 		t.Fatalf("expected non-loopback rejection, got %v", err)
 	}
@@ -95,7 +96,7 @@ func TestListenRejectsEmptyPasswordOnNonLoopback(t *testing.T) {
 
 func TestListenRejectsHostnameWithEmptyPassword(t *testing.T) {
 	// hostnames are treated as non-loopback
-	err := Listen(context.Background(), Config{Host: "localhost", Port: 0}, nil, nil)
+	err := Listen(context.Background(), Config{Host: "localhost", Port: 0}, nil)
 	if err == nil || !strings.Contains(err.Error(), "non-loopback") {
 		t.Fatalf("expected hostname rejection, got %v", err)
 	}
@@ -132,7 +133,7 @@ func startServer(t *testing.T, password string, hostKeyPEM []byte, handler Handl
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Listen(ctx, conf, handler, nil) }()
+	go func() { done <- Listen(ctx, conf, handler) }()
 
 	deadline := time.Now().Add(3 * time.Second)
 	var ready bool
@@ -457,15 +458,26 @@ func TestConnectHostPublicKeyParseError(t *testing.T) {
 	}
 }
 
+func TestListenRejectsNilHandler(t *testing.T) {
+	err := Listen(context.Background(), Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "nil handler") {
+		t.Fatalf("expected nil-handler error, got %v", err)
+	}
+}
+
 func TestListenBadHostKeyPEM(t *testing.T) {
+	noop := func(_ context.Context, _ Session, _ []string) error { return nil }
 	err := Listen(context.Background(), Config{
 		Host:       "127.0.0.1",
 		Port:       freePort(t),
 		Password:   "pw",
 		HostKeyPEM: []byte("not a pem key"),
-	}, nil, nil)
+	}, noop)
 	if err == nil {
 		t.Fatal("expected error from bad HostKeyPEM")
+	}
+	if strings.Contains(err.Error(), "nil handler") {
+		t.Fatalf("test short-circuited on nil-handler guard: %v", err)
 	}
 }
 
@@ -707,17 +719,16 @@ func TestSessionContextCancelsOnDisconnect(t *testing.T) {
 	}
 }
 
-// TestNoTUIInteractiveSessionClosesCleanly mirrors what Connect does on the
-// public empty-args path: request a PTY then a shell. With newTUI=nil the
-// server must not invoke the CLI handler; the session must close cleanly via
-// the no-op TUI.
-func TestNoTUIInteractiveSessionClosesCleanly(t *testing.T) {
-	var handlerCalled bool
+// TestShellRequestRoutesToHandlerWithEmptyArgs verifies the unified design:
+// a PTY+shell session reaches Handler with args=[]string{}, and a nil return
+// closes the session cleanly.
+func TestShellRequestRoutesToHandlerWithEmptyArgs(t *testing.T) {
+	gotArgs := make(chan []string, 1)
 	handler := func(_ context.Context, _ Session, args []string) error {
-		handlerCalled = true
-		return fmt.Errorf("handler must not be called, got args=%v", args)
+		gotArgs <- args
+		return nil
 	}
-	conf, stop := startServer(t, "pw", nil, handler) // newTUI nil
+	conf, stop := startServer(t, "pw", nil, handler)
 	defer stop()
 
 	c := dialSSH(t, conf, gossh.Password("pw"))
@@ -737,12 +748,167 @@ func TestNoTUIInteractiveSessionClosesCleanly(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() { done <- sess.Wait() }()
+
+	select {
+	case args := <-gotArgs:
+		if len(args) != 0 {
+			t.Fatalf("expected empty args for shell session, got %v", args)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler not invoked for shell session")
+	}
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
-		t.Fatal("interactive session with newTUI=nil did not close")
+		t.Fatal("shell session did not close after handler returned nil")
 	}
-	if handlerCalled {
-		t.Fatal("CLI handler was invoked for an interactive (shell) session")
+}
+
+func TestShellRequestCanLaunchMainTUI(t *testing.T) {
+	ran := make(chan struct{})
+	handler := func(_ context.Context, _ Session, args []string) error {
+		if len(args) != 0 {
+			return ErrNotHandled
+		}
+		return &Interactive{Model: recordingTUI{ran: ran}}
+	}
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	c := dialSSH(t, conf, gossh.Password("pw"))
+	defer c.Close()
+	sess, err := c.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	if err := sess.RequestPty("xterm-256color", 24, 80, gossh.TerminalModes{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Shell(); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- sess.Wait() }()
+	select {
+	case <-ran:
+	case <-time.After(3 * time.Second):
+		t.Fatal("main TUI never ran")
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("session did not close")
+	}
+}
+
+// --- Interactive subcommand ---
+
+// recordingTUI is a minimal tea.Model that quits on its first Update tick
+// after recording that it ran. Lets us assert "TUI was reached".
+type recordingTUI struct{ ran chan struct{} }
+
+func (m recordingTUI) Init() tea.Cmd { return nil }
+func (m recordingTUI) Update(_ tea.Msg) (tea.Model, tea.Cmd) {
+	select {
+	case <-m.ran:
+	default:
+		close(m.ran)
+	}
+	return m, tea.Quit
+}
+func (m recordingTUI) View() tea.View { return tea.NewView("") }
+
+func TestInteractiveSubcommandViaSSH(t *testing.T) {
+	ran := make(chan struct{})
+	handler := func(_ context.Context, _ Session, args []string) error {
+		if args[0] != "dashboard" {
+			return ErrNotHandled
+		}
+		return &Interactive{Model: recordingTUI{ran: ran}}
+	}
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	c := dialSSH(t, conf, gossh.Password("pw"))
+	defer c.Close()
+	sess, err := c.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	if err := sess.RequestPty("xterm-256color", 24, 80, gossh.TerminalModes{}); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- sess.Run("dashboard") }()
+
+	select {
+	case <-ran:
+	case <-time.After(3 * time.Second):
+		t.Fatal("TUI never ran")
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("session did not close after TUI quit")
+	}
+}
+
+func TestInteractiveWithoutPTYFails(t *testing.T) {
+	handler := func(_ context.Context, _ Session, _ []string) error {
+		return &Interactive{Model: recordingTUI{ran: make(chan struct{})}}
+	}
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	c := dialSSH(t, conf, gossh.Password("pw"))
+	defer c.Close()
+	sess, err := c.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	var stderr strings.Builder
+	sess.Stderr = &stderr
+	err = sess.Run("dashboard") // no RequestPty
+
+	var exitErr *gossh.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitStatus() != 1 {
+		t.Fatalf("expected exit 1, got %v", err)
+	}
+	if !strings.Contains(stderr.String(), "requires a PTY") {
+		t.Errorf("missing diagnostic in stderr: %q", stderr.String())
+	}
+}
+
+func TestWithPTYDoesNotForceInteractive(t *testing.T) {
+	// Handler does NOT return Interactive; even with PTY allocated, normal
+	// command path should run and produce stdout.
+	handler := func(_ context.Context, s Session, args []string) error {
+		fmt.Fprintf(s, "ran:%s", args[0])
+		return nil
+	}
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	c := dialSSH(t, conf, gossh.Password("pw"))
+	defer c.Close()
+	sess, err := c.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	if err := sess.RequestPty("xterm-256color", 24, 80, gossh.TerminalModes{}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := sess.Output("greet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "ran:greet" {
+		t.Fatalf("got %q", out)
 	}
 }

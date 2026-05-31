@@ -32,20 +32,26 @@ type Session interface {
 
 type Handler func(ctx context.Context, s Session, args []string) error
 
+// Handler is the single dispatch point. args is empty for interactive
+// (no-args) clients — return *Interactive there to launch the main TUI.
 // Return ErrNotHandled if the command is unknown; the session closes.
 // Return *ExitError to set a custom remote exit code:
 //   return &clink.ExitError{Code: 2, Err: err}
+// Return *Interactive to launch a Bubble Tea TUI for this command:
+//   return &clink.Interactive{Model: dashboard.New()}
+//   (subcommand TUIs require the client to call Connect with clink.WithPTY)
 // ctx is cancelled when the client disconnects.
-// Interactive (no-args) clients open a TUI directly via SSH shell —
-// they never reach Handler.
 
 // Daemon side: listen for incoming commands and TUI sessions.
-// Pass nil for newTUI if no TUI is needed.
-clink.Listen(ctx, conf, handler, newTUI)
+clink.Listen(ctx, conf, handler)
 
 // Client side: connect to the daemon and send a command.
 // If args is empty, opens an interactive TUI session.
 clink.Connect(conf, args)
+
+// For subcommands whose Handler returns *Interactive, opt the client
+// into PTY allocation so the TUI can render:
+clink.Connect(conf, args, clink.WithPTY())
 ```
 
 ## Usage with urfave/cli v3
@@ -55,6 +61,10 @@ clink.Connect(conf, args)
 ```go
 func startServer(ctx context.Context) error {
     handler := func(ctx context.Context, s clink.Session, args []string) error {
+        if len(args) == 0 {
+            return &clink.Interactive{Model: newMainTUI()}
+        }
+
         cmd := &cli.Command{
             Name:     "myapp",
             Commands: commands(), // your subcommands
@@ -71,7 +81,7 @@ func startServer(ctx context.Context) error {
     }
 
     conf := clink.Config{Port: 2222, Password: "secret"}
-    return clink.Listen(ctx, conf, handler, newTUI)
+    return clink.Listen(ctx, conf, handler)
 }
 
 func propagateWriter(s clink.Session, cmd *cli.Command) {
@@ -141,7 +151,7 @@ func startServer(ctx context.Context) error {
     }
 
     conf := clink.Config{Port: 2222, Password: "secret"}
-    return clink.Listen(ctx, conf, handler, nil)
+    return clink.Listen(ctx, conf, handler)
 }
 ```
 
