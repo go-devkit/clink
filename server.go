@@ -55,9 +55,11 @@ type Session interface {
 }
 
 // Handler processes a CLI command received from a connected client.
-// args contains the parsed command arguments (without leading "--" separators).
-// Return ErrNotHandled to signal that the command is not recognized,
-// which causes the server to fall through to the TUI.
+// args contains the parsed command arguments (without leading "--" separators);
+// args is empty for interactive (no-args) clients.
+// Return ErrNotHandled if the command is not recognized — the session closes.
+// Return *ExitError to set a custom remote exit code.
+// Return *Interactive to launch a Bubble Tea TUI for this command.
 type Handler func(ctx context.Context, s Session, args []string) error
 
 // ErrNotHandled is returned by a Handler to indicate the command was not recognized.
@@ -257,9 +259,8 @@ func runInteractive(s ssh.Session, i *Interactive) {
 		_ = s.Exit(1)
 		return
 	}
-	opts := append(i.Opts,
-		tea.WithWindowSize(pty.Window.Width, pty.Window.Height),
-	)
+	opts := append([]tea.ProgramOption(nil), i.Opts...)
+	opts = append(opts, tea.WithWindowSize(pty.Window.Width, pty.Window.Height))
 	opts = append(opts, bubbletea.MakeOptions(s)...)
 	p := tea.NewProgram(i.Model, opts...)
 	ctx, cancel := context.WithCancel(s.Context())
