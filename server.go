@@ -80,10 +80,9 @@ func (e *ExitError) Error() string {
 func (e *ExitError) Unwrap() error { return e.Err }
 
 // Interactive is returned by a Handler to launch a Bubble Tea TUI.
-// For empty-args sessions a PTY is already allocated via the SSH shell
-// request. For non-empty subcommands, the client must opt into a PTY by
-// calling Connect with clink.WithPTY(); otherwise the session exits with
-// code 1 and a stderr message.
+// Empty-args sessions: the client already allocates a PTY before opening
+// the shell. Non-empty subcommands: the client must opt in via
+// clink.WithPTY(); without it the session exits 1 with a stderr message.
 type Interactive struct {
 	Model tea.Model
 	Opts  []tea.ProgramOption
@@ -184,7 +183,6 @@ func handleCLI(parent context.Context, handler Handler) wish.Middleware {
 				return
 			}
 			if errors.Is(err, ErrNotHandled) {
-				next(s)
 				return
 			}
 
@@ -253,13 +251,17 @@ func runInteractive(s ssh.Session, i *Interactive) {
 		_ = s.Exit(1)
 		return
 	}
-	_, winch, ok := s.Pty()
+	pty, winch, ok := s.Pty()
 	if !ok {
 		fmt.Fprintln(s.Stderr(), "clink: interactive command requires a PTY (use clink.WithPTY)")
 		_ = s.Exit(1)
 		return
 	}
-	p := tea.NewProgram(i.Model, append(i.Opts, bubbletea.MakeOptions(s)...)...)
+	opts := append(i.Opts,
+		tea.WithWindowSize(pty.Window.Width, pty.Window.Height),
+	)
+	opts = append(opts, bubbletea.MakeOptions(s)...)
+	p := tea.NewProgram(i.Model, opts...)
 	ctx, cancel := context.WithCancel(s.Context())
 	defer cancel()
 	go func() {
@@ -276,7 +278,12 @@ func runInteractive(s ssh.Session, i *Interactive) {
 			}
 		}
 	}()
-	_, _ = p.Run()
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(s.Stderr(), "clink: TUI exited with error: %v\n", err)
+		p.Kill()
+		_ = s.Exit(1)
+		return
+	}
 	p.Kill()
 }
 
