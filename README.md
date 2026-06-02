@@ -56,77 +56,70 @@ clink.Connect(conf, args, clink.WithPTY())
 
 ## Usage with urfave/cli v3
 
-### Server
+The `github.com/go-devkit/clink/urfave` subpackage removes the boilerplate.
+Wrap each Action with `Wrap` (or `WrapTUI` for Bubble Tea commands), attach
+`Serve(factory)` to any subcommand you want, and run as a normal CLI. Same
+binary, same tree, both modes.
 
 ```go
-func startServer(ctx context.Context) error {
-    handler := func(ctx context.Context, s clink.Session, args []string) error {
-        if len(args) == 0 {
+import (
+    "context"
+    "fmt"
+    "os"
+
+    "github.com/go-devkit/clink"
+    "github.com/go-devkit/clink/urfave"
+    "github.com/urfave/cli/v3"
+)
+
+func newRoot() *cli.Command {
+    return &cli.Command{
+        Name: "myapp",
+        // Optional: main TUI when invoked with no subcommand.
+        Action: urfave.WrapTUI(func(_ context.Context, _ *cli.Command) error {
             return &clink.Interactive{Model: newMainTUI()}
-        }
-
-        cmd := &cli.Command{
-            Name:     "myapp",
-            Commands: commands(), // your subcommands
-        }
-
-        // Wire session I/O into the CLI command tree
-        propagateWriter(s, cmd)
-
-        if cmd.Command(args[0]) == nil {
-            return clink.ErrNotHandled
-        }
-
-        return cmd.Run(ctx, append([]string{cmd.Name}, args...))
+        }),
+        Commands: []*cli.Command{
+            {
+                Name:  "greet",
+                Flags: []cli.Flag{&cli.StringFlag{Name: "name", Value: "world"}},
+                Action: urfave.Wrap(func(_ context.Context, cmd *cli.Command) error {
+                    fmt.Fprintf(cmd.Writer, "hello %s\n", cmd.String("name"))
+                    return nil
+                }),
+            },
+            {
+                Name: "dashboard",
+                Action: urfave.WrapTUI(func(_ context.Context, _ *cli.Command) error {
+                    return &clink.Interactive{Model: newDashboard()}
+                }),
+            },
+            {
+                Name:   "daemon",
+                Usage:  "Run the clink server",
+                Action: urfave.Serve(newRoot),
+            },
+        },
     }
-
-    conf := clink.Config{Port: 2222, Password: "secret"}
-    return clink.Listen(ctx, conf, handler)
 }
 
-func propagateWriter(s clink.Session, cmd *cli.Command) {
-    cmd.Reader = s
-    cmd.Writer = s
-    cmd.ErrWriter = s.Stderr()
+func main() {
+    urfave.SetDefault(clink.Config{Port: 2222, Password: "secret"})
 
-    for _, sub := range cmd.Commands {
-        propagateWriter(s, sub)
+    if err := newRoot().Run(context.Background(), os.Args); err != nil {
+        fmt.Fprintln(os.Stderr, err)
+        os.Exit(1)
     }
 }
 ```
 
-### Client
+- `myapp daemon` — runs the server.
+- `myapp greet --name alice` — forwards to the daemon and prints `hello alice`.
+- `myapp dashboard` — forwards with a PTY, server runs the Bubble Tea model.
+- `myapp` (no subcommand) — opens the main TUI via SSH `shell`.
 
-```go
-cmd := &cli.Command{
-    Name: "myapp",
-    Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
-        if cmd.Args().First() == "serve" {
-            return ctx, nil // don't forward the serve command itself
-        }
-
-        conf := clink.Config{
-            Host:     cmd.String("host"),
-            Port:     int(cmd.Int("port")),
-            Password: cmd.String("password"),
-        }
-
-        // cmd.Args().Slice() contains only the subcommand and its args,
-        // excluding root-level flags like --host/--port/--password.
-        if err := clink.Connect(conf, cmd.Args().Slice()); err != nil {
-            return ctx, fmt.Errorf("connection failed: %w", err)
-        }
-
-        return ctx, cli.Exit("", 0) // prevent local execution
-    },
-    Flags: []cli.Flag{
-        &cli.StringFlag{Name: "host", Value: "127.0.0.1"},
-        &cli.IntFlag{Name: "port", Value: 2222},
-        &cli.StringFlag{Name: "password"},
-    },
-    Commands: commands(),
-}
-```
+`Serve` calls the factory once per incoming session, so the command tree is
+isolated between concurrent invocations.
 
 ## Usage with cobra
 
