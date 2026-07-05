@@ -103,7 +103,7 @@ func TestListenRejectsHostnameWithEmptyPassword(t *testing.T) {
 }
 
 func TestConnectRejectsNonLoopbackWithoutHostKey(t *testing.T) {
-	err := Connect(Config{Host: "8.8.8.8", Port: 22}, []string{"x"})
+	err := Connect(context.Background(), Config{Host: "8.8.8.8", Port: 22}, []string{"x"})
 	if err == nil || !strings.Contains(err.Error(), "non-loopback") {
 		t.Fatalf("expected non-loopback rejection, got %v", err)
 	}
@@ -423,7 +423,7 @@ func TestConnectHostPublicKeyAccepts(t *testing.T) {
 	os.Stdout = stdoutW
 	t.Cleanup(func() { os.Stdin, os.Stdout, os.Stderr = origIn, origOut, origErr })
 
-	if err := Connect(clientConf, []string{"x"}); err != nil {
+	if err := Connect(context.Background(), clientConf, []string{"x"}); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	stdoutW.Close()
@@ -445,14 +445,14 @@ func TestConnectHostPublicKeyMismatchRejects(t *testing.T) {
 	clientConf := conf
 	clientConf.HostPublicKey = other.RawAuthorizedKey()
 
-	err = Connect(clientConf, []string{"x"})
+	err = Connect(context.Background(), clientConf, []string{"x"})
 	if err == nil {
 		t.Fatal("expected host key mismatch error")
 	}
 }
 
 func TestConnectHostPublicKeyParseError(t *testing.T) {
-	err := Connect(Config{Host: "127.0.0.1", Port: 1, HostPublicKey: []byte("not a key")}, []string{"x"})
+	err := Connect(context.Background(), Config{Host: "127.0.0.1", Port: 1, HostPublicKey: []byte("not a key")}, []string{"x"})
 	if err == nil || !strings.Contains(err.Error(), "parse HostPublicKey") {
 		t.Fatalf("expected parse error, got %v", err)
 	}
@@ -586,7 +586,7 @@ func TestConnectStdinPiping(t *testing.T) {
 		outCh <- b
 	}()
 
-	if err := Connect(conf, []string{"upper"}); err != nil {
+	if err := Connect(context.Background(), conf, []string{"upper"}); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	stdoutW.Close()
@@ -881,6 +881,390 @@ func TestInteractiveWithoutPTYFails(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "requires a PTY") {
 		t.Errorf("missing diagnostic in stderr: %q", stderr.String())
+	}
+}
+
+// --- file forwarding ---
+
+func TestSessionReadFile(t *testing.T) {
+	tmp := t.TempDir()
+	src := tmp + "/data.txt"
+	want := []byte("hello from client disk")
+	if err := os.WriteFile(src, want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(chan []byte, 1)
+	gotErr := make(chan error, 1)
+	handler := func(_ context.Context, s Session, args []string) error {
+		if len(args) == 0 {
+			return ErrNotHandled
+		}
+		data, err := s.ReadFile(args[0])
+		if err != nil {
+			gotErr <- err
+			return nil
+		}
+		got <- data
+		return nil
+	}
+
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	if err := Connect(context.Background(), conf, []string{src}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	select {
+	case data := <-got:
+		if string(data) != string(want) {
+			t.Fatalf("ReadFile = %q, want %q", data, want)
+		}
+	case err := <-gotErr:
+		t.Fatalf("handler ReadFile error: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler did not complete")
+	}
+}
+
+func TestSessionOpenFileStream(t *testing.T) {
+	tmp := t.TempDir()
+	src := tmp + "/stream.bin"
+	want := make([]byte, 256*1024)
+	for i := range want {
+		want[i] = byte(i)
+	}
+	if err := os.WriteFile(src, want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	gotLen := make(chan int, 1)
+	gotErr := make(chan error, 1)
+	handler := func(_ context.Context, s Session, args []string) error {
+		rc, err := s.OpenFile(args[0])
+		if err != nil {
+			gotErr <- err
+			return nil
+		}
+		defer rc.Close()
+		data, err := io.ReadAll(rc)
+		if err != nil {
+			gotErr <- err
+			return nil
+		}
+		if string(data) != string(want) {
+			gotErr <- fmt.Errorf("content mismatch (got %d bytes)", len(data))
+			return nil
+		}
+		gotLen <- len(data)
+		return nil
+	}
+
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	if err := Connect(context.Background(), conf, []string{src}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	select {
+	case n := <-gotLen:
+		if n != len(want) {
+			t.Fatalf("len = %d, want %d", n, len(want))
+		}
+	case err := <-gotErr:
+		t.Fatal(err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout")
+	}
+}
+
+func TestSessionWriteFile(t *testing.T) {
+	tmp := t.TempDir()
+	dst := tmp + "/out.txt"
+	payload := []byte("written by server via reverse channel")
+
+	gotErr := make(chan error, 1)
+	done := make(chan struct{})
+	handler := func(_ context.Context, s Session, args []string) error {
+		if err := s.WriteFile(args[0], payload); err != nil {
+			gotErr <- err
+			return nil
+		}
+		close(done)
+		return nil
+	}
+
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	if err := Connect(context.Background(), conf, []string{dst}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	select {
+	case <-done:
+	case err := <-gotErr:
+		t.Fatal(err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout")
+	}
+
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("disk = %q, want %q", got, payload)
+	}
+}
+
+func TestSessionCreateFileStream(t *testing.T) {
+	tmp := t.TempDir()
+	dst := tmp + "/stream-out.bin"
+	chunk := []byte("0123456789")
+	const chunks = 1024
+
+	gotErr := make(chan error, 1)
+	done := make(chan struct{})
+	handler := func(_ context.Context, s Session, args []string) error {
+		wc, err := s.CreateFile(args[0])
+		if err != nil {
+			gotErr <- err
+			return nil
+		}
+		for i := 0; i < chunks; i++ {
+			if _, err := wc.Write(chunk); err != nil {
+				gotErr <- err
+				wc.Close()
+				return nil
+			}
+		}
+		if err := wc.Close(); err != nil {
+			gotErr <- err
+			return nil
+		}
+		close(done)
+		return nil
+	}
+
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	if err := Connect(context.Background(), conf, []string{dst}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	select {
+	case <-done:
+	case err := <-gotErr:
+		t.Fatal(err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout")
+	}
+
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(chunk)*chunks {
+		t.Fatalf("len = %d, want %d", len(got), len(chunk)*chunks)
+	}
+}
+
+func TestSessionFileAllowlistRejects(t *testing.T) {
+	gotErr := make(chan error, 1)
+	handler := func(_ context.Context, s Session, args []string) error {
+		_, err := s.ReadFile("/etc/passwd") // never in args
+		gotErr <- err
+		return nil
+	}
+
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	if err := Connect(context.Background(), conf, []string{"unrelated-arg"}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	select {
+	case err := <-gotErr:
+		if err == nil || !strings.Contains(err.Error(), "not in allowlist") {
+			t.Fatalf("expected allowlist rejection, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout")
+	}
+}
+
+func TestSessionFileAllowlistAllowsEqualsForm(t *testing.T) {
+	tmp := t.TempDir()
+	src := tmp + "/eq.txt"
+	if err := os.WriteFile(src, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(chan []byte, 1)
+	handler := func(_ context.Context, s Session, args []string) error {
+		// arg is "--file=<path>"; server requests bare path which is the RHS.
+		data, err := s.ReadFile(src)
+		if err != nil {
+			return err
+		}
+		got <- data
+		return nil
+	}
+
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	if err := Connect(context.Background(), conf, []string{"--file=" + src}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	select {
+	case data := <-got:
+		if string(data) != "ok" {
+			t.Fatalf("got %q", data)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout")
+	}
+}
+
+func TestSessionReadFileNotFound(t *testing.T) {
+	tmp := t.TempDir()
+	missing := tmp + "/missing.txt"
+	gotErr := make(chan error, 1)
+	handler := func(_ context.Context, s Session, args []string) error {
+		_, err := s.ReadFile(args[0])
+		gotErr <- err
+		return nil
+	}
+
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	if err := Connect(context.Background(), conf, []string{missing}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	select {
+	case err := <-gotErr:
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		// The client-side os.Open error message should propagate.
+		if !strings.Contains(err.Error(), "no such file") {
+			t.Fatalf("expected 'no such file' in error, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout")
+	}
+}
+
+// --- local commands + AutoPTY ---
+
+func TestWithLocalCommandDispatchesLocally(t *testing.T) {
+	// Point at a port with nothing listening; local command must still fire.
+	conf := Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}
+
+	called := false
+	var gotArgs []string
+	fn := func(_ context.Context, args []string) error {
+		called = true
+		gotArgs = args
+		return nil
+	}
+	err := Connect(context.Background(), conf, []string{"run", "--flag"},
+		WithLocalCommand("run", fn))
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if !called {
+		t.Fatal("local fn not called")
+	}
+	if len(gotArgs) != 2 || gotArgs[0] != "run" || gotArgs[1] != "--flag" {
+		t.Fatalf("gotArgs = %v", gotArgs)
+	}
+}
+
+func TestWithLocalCommandRefusesWhenDaemonUp(t *testing.T) {
+	handler := func(_ context.Context, _ Session, _ []string) error { return nil }
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	err := Connect(context.Background(), conf, []string{"run"},
+		WithLocalCommand("run", func(_ context.Context, _ []string) error {
+			t.Fatal("local fn should not run when daemon is up")
+			return nil
+		}))
+	if err == nil || !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("expected refusal, got %v", err)
+	}
+}
+
+func TestWithLocalCommandNonMatchForwards(t *testing.T) {
+	// Non-matching arg[0] falls through to normal Connect (which fails to dial
+	// an empty port). We only care that the local fn is NOT called.
+	conf := Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}
+	err := Connect(context.Background(), conf, []string{"other"},
+		WithLocalCommand("run", func(_ context.Context, _ []string) error {
+			t.Fatal("local fn should not run for non-matching args[0]")
+			return nil
+		}))
+	if err == nil {
+		t.Fatal("expected dial error")
+	}
+}
+
+func TestWithLocalFallbackRunsLocalWhenDaemonDown(t *testing.T) {
+	conf := Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}
+	called := false
+	err := Connect(context.Background(), conf, nil,
+		WithLocalFallback("", func(_ context.Context, _ []string) error {
+			called = true
+			return nil
+		}))
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if !called {
+		t.Fatal("fallback fn not called with daemon down")
+	}
+}
+
+func TestWithLocalFallbackForwardsWhenDaemonUp(t *testing.T) {
+	handler := func(_ context.Context, s Session, args []string) error {
+		fmt.Fprintf(s, "server-args=%v", args)
+		return nil
+	}
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	err := Connect(context.Background(), conf, []string{"anything"},
+		WithLocalFallback("anything", func(_ context.Context, _ []string) error {
+			t.Fatal("fallback fn should not run when daemon is up")
+			return nil
+		}))
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+}
+
+func TestAutoPTYWithPipedStdin(t *testing.T) {
+	// os.Stdin in `go test` is not a tty. AutoPTY should NOT set pty.
+	var co connectOpts
+	AutoPTY()(&co)
+	if co.pty {
+		t.Fatal("AutoPTY set pty when stdin is not a terminal")
+	}
+}
+
+func TestAllowlistBuild(t *testing.T) {
+	a := newAllowlist([]string{"foo", "--file=/tmp/x", "/abs/path"})
+	for _, p := range []string{"foo", "--file=/tmp/x", "/tmp/x", "/abs/path"} {
+		if !a.allowed(p) {
+			t.Errorf("allowlist missing %q", p)
+		}
+	}
+	if a.allowed("not-in-args") {
+		t.Error("allowlist accepted unknown path")
 	}
 }
 

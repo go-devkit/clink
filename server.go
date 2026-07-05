@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"charm.land/wish/v2/bubbletea"
 	"github.com/charmbracelet/keygen"
 	"github.com/charmbracelet/ssh"
+	gossh "golang.org/x/crypto/ssh"
 )
 
 // Config holds the connection settings for Listen and Connect.
@@ -48,10 +50,45 @@ type Config struct {
 }
 
 // Session provides I/O for command handlers.
+//
+// ReadFile/OpenFile/WriteFile/CreateFile request files on the client's local
+// filesystem. The client enforces an exact-string allowlist derived from the
+// args it passed to Connect: only paths matching one of those argv strings are
+// served. Anything else is rejected with "path not in allowlist".
 type Session interface {
 	io.Reader
 	io.Writer
 	Stderr() io.Writer
+
+	ReadFile(path string) ([]byte, error)
+	OpenFile(path string) (io.ReadCloser, error)
+	WriteFile(path string, data []byte) error
+	CreateFile(path string) (io.WriteCloser, error)
+}
+
+// fileRequest is the channel-open payload for file-request channels.
+type fileRequest struct {
+	Path string `json:"path"`
+	Mode string `json:"mode"` // "read" or "write"
+}
+
+const fileRequestChannel = "file-request"
+
+type sessionCtxKey struct{}
+
+// SessionFrom returns the clink.Session attached to ctx by the daemon, or nil
+// if ctx was not produced by a clink handler. Use this in cli actions wrapped
+// with urfave.Wrap/WrapTUI to call Session.ReadFile etc.
+func SessionFrom(ctx context.Context) Session {
+	s, _ := ctx.Value(sessionCtxKey{}).(Session)
+	return s
+}
+
+// WithSession attaches s to ctx so handlers reachable via SessionFrom can use
+// it. The daemon dispatcher (e.g. urfave.Serve) is responsible for calling
+// this before running the cli command.
+func WithSession(ctx context.Context, s Session) context.Context {
+	return context.WithValue(ctx, sessionCtxKey{}, s)
 }
 
 // Handler processes a CLI command received from a connected client.
@@ -180,7 +217,8 @@ func handleCLI(parent context.Context, handler Handler) wish.Middleware {
 				}
 			}()
 
-			err := handler(ctx, &sessionWrapper{s}, args)
+			conn, _ := s.Context().Value(ssh.ContextKeyConn).(*gossh.ServerConn)
+			err := handler(ctx, &sessionWrapper{s: s, conn: conn}, args)
 			if err == nil {
 				return
 			}
@@ -214,12 +252,82 @@ func handleCLI(parent context.Context, handler Handler) wish.Middleware {
 }
 
 type sessionWrapper struct {
-	s ssh.Session
+	s    ssh.Session
+	conn *gossh.ServerConn
 }
 
 func (w *sessionWrapper) Read(p []byte) (int, error)  { return w.s.Read(p) }
 func (w *sessionWrapper) Write(p []byte) (int, error) { return w.s.Write(p) }
-func (w *sessionWrapper) Stderr() io.Writer            { return w.s.Stderr() }
+func (w *sessionWrapper) Stderr() io.Writer           { return w.s.Stderr() }
+
+func (w *sessionWrapper) openFileChannel(path, mode string) (gossh.Channel, error) {
+	if w.conn == nil {
+		return nil, errors.New("clink: no client connection available for file transfer")
+	}
+	payload, err := json.Marshal(fileRequest{Path: path, Mode: mode})
+	if err != nil {
+		return nil, fmt.Errorf("marshal file request: %w", err)
+	}
+	ch, reqs, err := w.conn.OpenChannel(fileRequestChannel, payload)
+	if err != nil {
+		var openErr *gossh.OpenChannelError
+		if errors.As(err, &openErr) {
+			return nil, fmt.Errorf("client refused file %s: %s", mode, openErr.Message)
+		}
+		return nil, fmt.Errorf("open file channel: %w", err)
+	}
+	go gossh.DiscardRequests(reqs)
+	return ch, nil
+}
+
+func (w *sessionWrapper) ReadFile(path string) ([]byte, error) {
+	rc, err := w.OpenFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
+func (w *sessionWrapper) OpenFile(path string) (io.ReadCloser, error) {
+	ch, err := w.openFileChannel(path, "read")
+	if err != nil {
+		return nil, err
+	}
+	return ch, nil
+}
+
+func (w *sessionWrapper) WriteFile(path string, data []byte) error {
+	wc, err := w.CreateFile(path)
+	if err != nil {
+		return err
+	}
+	if _, err := wc.Write(data); err != nil {
+		wc.Close()
+		return err
+	}
+	return wc.Close()
+}
+
+func (w *sessionWrapper) CreateFile(path string) (io.WriteCloser, error) {
+	ch, err := w.openFileChannel(path, "write")
+	if err != nil {
+		return nil, err
+	}
+	return &writeChannel{ch: ch}, nil
+}
+
+// writeChannel wraps a gossh.Channel so Close sends EOF (signals end-of-write
+// to the client) before closing the full channel.
+type writeChannel struct {
+	ch gossh.Channel
+}
+
+func (w *writeChannel) Write(p []byte) (int, error) { return w.ch.Write(p) }
+func (w *writeChannel) Close() error {
+	_ = w.ch.CloseWrite()
+	return w.ch.Close()
+}
 
 // normalizeHost applies the shared Host handling for Listen and Connect:
 // defaulting empty to 127.0.0.1, trimming a single pair of IPv6 brackets,

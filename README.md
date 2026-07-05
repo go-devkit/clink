@@ -28,6 +28,15 @@ type Session interface {
     io.Reader
     io.Writer
     Stderr() io.Writer
+
+    // File forwarding: server reads/writes files on the client's local
+    // filesystem. The client enforces an exact-string allowlist derived from
+    // the args it passed to Connect — only paths matching one of those argv
+    // strings (or the RHS of "--name=value") are served.
+    ReadFile(path string) ([]byte, error)
+    OpenFile(path string) (io.ReadCloser, error)
+    WriteFile(path string, data []byte) error
+    CreateFile(path string) (io.WriteCloser, error)
 }
 
 type Handler func(ctx context.Context, s Session, args []string) error
@@ -45,145 +54,83 @@ type Handler func(ctx context.Context, s Session, args []string) error
 // Daemon side: listen for incoming commands and TUI sessions.
 clink.Listen(ctx, conf, handler)
 
-// Client side: connect to the daemon and send a command.
-// If args is empty, opens an interactive TUI session.
-clink.Connect(conf, args)
-
-// For subcommands whose Handler returns *Interactive, opt the client
-// into PTY allocation so the TUI can render:
-clink.Connect(conf, args, clink.WithPTY())
+// Client side. Connect forwards args to the daemon.
+// AutoPTY allocates a PTY iff os.Stdin is a terminal (mirrors ssh's default),
+// so the same call handles TUI subcommands and pipe-friendly plain commands.
+// WithLocalCommand names a subcommand that must run locally instead of being
+// forwarded (typically the one that starts the daemon). Connect refuses to
+// invoke a local command when a daemon is already reachable, preventing a
+// double-run.
+// WithLocalFallback names a command that runs locally ONLY when no daemon is
+// reachable; if the daemon is up, Connect forwards as usual. Use name "" to
+// match the no-args invocation — handy for an entry that opens the dashboard
+// when the daemon runs and starts the daemon otherwise.
+clink.Connect(ctx, conf, args,
+    clink.AutoPTY(),
+    clink.WithLocalCommand("run", runLocally),
+    clink.WithLocalFallback("", runLocally),
+)
 ```
 
-## Usage with urfave/cli v3
+## Usage
 
-The `github.com/go-devkit/clink/urfave` subpackage removes the boilerplate.
-Wrap each Action with `Wrap` (or `WrapTUI` for Bubble Tea commands), attach
-`Serve(factory)` to any subcommand you want, and run as a normal CLI. Same
-binary, same tree, both modes.
+clink is framework-agnostic: the client only forwards, so it doesn't need any
+CLI framework. Only the `run` command (which starts the daemon) uses one on
+its way to `clink.Listen`. Below uses urfave/cli v3; cobra works identically.
 
 ```go
+package main
+
 import (
     "context"
-    "fmt"
     "os"
+    "os/signal"
+    "syscall"
 
     "github.com/go-devkit/clink"
-    "github.com/go-devkit/clink/urfave"
     "github.com/urfave/cli/v3"
 )
 
-func newRoot() *cli.Command {
-    return &cli.Command{
-        Name: "myapp",
-        // Optional: main TUI when invoked with no subcommand.
-        Action: urfave.WrapTUI(func(_ context.Context, _ *cli.Command) error {
-            return &clink.Interactive{Model: newMainTUI()}
-        }),
-        Commands: []*cli.Command{
-            {
-                Name:  "greet",
-                Flags: []cli.Flag{&cli.StringFlag{Name: "name", Value: "world"}},
-                Action: urfave.Wrap(func(_ context.Context, cmd *cli.Command) error {
-                    fmt.Fprintf(cmd.Writer, "hello %s\n", cmd.String("name"))
-                    return nil
-                }),
-            },
-            {
-                Name: "dashboard",
-                Action: urfave.WrapTUI(func(_ context.Context, _ *cli.Command) error {
-                    return &clink.Interactive{Model: newDashboard()}
-                }),
-            },
-            {
-                Name:   "daemon",
-                Usage:  "Run the clink server",
-                Action: urfave.Serve(newRoot),
-            },
-        },
-    }
-}
+var conf = clink.Config{Port: 2222, Password: "secret"}
 
 func main() {
-    urfave.SetDefault(clink.Config{Port: 2222, Password: "secret"})
+    ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+    defer stop()
 
-    if err := newRoot().Run(context.Background(), os.Args); err != nil {
-        fmt.Fprintln(os.Stderr, err)
+    err := clink.Connect(ctx, conf, os.Args[1:],
+        clink.AutoPTY(),
+        clink.WithLocalCommand("run", runLocally),
+    )
+    if err != nil {
         os.Exit(1)
     }
 }
-```
 
-- `myapp daemon` — runs the server.
-- `myapp greet --name alice` — forwards to the daemon and prints `hello alice`.
-- `myapp dashboard` — forwards with a PTY, server runs the Bubble Tea model.
-- `myapp` (no subcommand) — opens the main TUI via SSH `shell`.
-
-`Serve` calls the factory once per incoming session, so the command tree is
-isolated between concurrent invocations.
-
-## Usage with cobra
-
-### Server
-
-```go
-func startServer(ctx context.Context) error {
-    handler := func(ctx context.Context, s clink.Session, args []string) error {
-        cmd := newRootCmd() // your cobra root command
-
-        cmd.SetIn(s)
-        cmd.SetOut(s)
-        cmd.SetErr(s.Stderr())
-        cmd.SetArgs(args)
-
-        err := cmd.ExecuteContext(ctx)
-        if err != nil && strings.Contains(err.Error(), "unknown command") {
-            return clink.ErrNotHandled
-        }
-
+// runLocally is invoked instead of Connect when args[0] == "run".
+// This is where wire/DI builds the full application and hands the CLI
+// tree to clink.Listen.
+func runLocally(ctx context.Context, _ []string) error {
+    // e.g. wire.BuildApp() — full DI happens ONLY here, on the server env.
+    app, cleanup, err := buildApp(ctx)
+    if err != nil {
         return err
     }
+    defer cleanup()
 
-    conf := clink.Config{Port: 2222, Password: "secret"}
+    handler := func(hctx context.Context, s clink.Session, args []string) error {
+        cmd := app.Root() // *cli.Command with wire-injected subcommands
+        // urfave/cli v3 inherits Reader/Writer/ErrWriter from parent, so only
+        // the root needs wiring.
+        cmd.Reader, cmd.Writer, cmd.ErrWriter = s, s, s.Stderr()
+        return cmd.Run(clink.WithSession(hctx, s), append([]string{cmd.Name}, args...))
+    }
     return clink.Listen(ctx, conf, handler)
 }
 ```
 
-### Client
+- `myapp run` — starts the daemon; refuses if one is already up.
+- `myapp anything else …` — forwards to the daemon. PTY allocated when stdin is a tty (TUI subcommands work); no PTY when piped (`myapp report | jq` works).
+- `myapp` (no subcommand) — opens the daemon's shell-mode session; Handler receives empty args and can return `*Interactive` for the main TUI.
 
-```go
-var rootCmd = &cobra.Command{
-    Use: "myapp",
-    PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-        if cmd.Name() == "serve" {
-            return nil // don't forward the serve command itself
-        }
-
-        host, _ := cmd.Root().PersistentFlags().GetString("host")
-        port, _ := cmd.Root().PersistentFlags().GetInt("port")
-        password, _ := cmd.Root().PersistentFlags().GetString("password")
-
-        conf := clink.Config{Host: host, Port: port, Password: password}
-
-        // Build forwarded args: subcommand name + its own flags + positional args.
-        // This excludes persistent connection flags (--host/--port/--password).
-        fwdArgs := []string{cmd.Name()}
-        cmd.NonInheritedFlags().Visit(func(f *pflag.Flag) {
-            fwdArgs = append(fwdArgs, "--"+f.Name, f.Value.String())
-        })
-        fwdArgs = append(fwdArgs, args...)
-
-        if err := clink.Connect(conf, fwdArgs); err != nil {
-            return fmt.Errorf("connection failed: %w", err)
-        }
-
-        os.Exit(0) // prevent local execution
-        return nil
-    },
-}
-
-func init() {
-    rootCmd.PersistentFlags().String("host", "127.0.0.1", "daemon host")
-    rootCmd.PersistentFlags().Int("port", 2222, "daemon port")
-    rootCmd.PersistentFlags().String("password", "", "daemon password")
-}
-```
+The client binary never touches wire, DB, or any server-only service. Only
+`runLocally` does. Same binary on both sides.
