@@ -16,6 +16,11 @@ import (
 	"golang.org/x/term"
 )
 
+// fileRequestConcurrency caps how many client-side file transfers can run at
+// once per Connect. Excess requests are rejected with ResourceShortage rather
+// than spawning unbounded goroutines / file descriptors.
+const fileRequestConcurrency = 32
+
 // ConnectOption configures Connect. See WithPTY, AutoPTY, WithLocalCommand.
 type ConnectOption func(*connectOpts)
 
@@ -130,23 +135,42 @@ func Connect(ctx context.Context, conf Config, args []string, opts ...ConnectOpt
 	}
 
 	addr := net.JoinHostPort(host, strconv.Itoa(conf.Port))
-	tcpConn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	d := net.Dialer{Timeout: 10 * time.Second}
+	tcpConn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
+	handshakeDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = tcpConn.Close()
+		case <-handshakeDone:
+		}
+	}()
 	sshConn, chans, reqs, err := ssh.NewClientConn(tcpConn, addr, config)
+	close(handshakeDone)
 	if err != nil {
-		tcpConn.Close()
+		_ = tcpConn.Close()
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
 	allow := newAllowlist(args)
+	fileSem := make(chan struct{}, fileRequestConcurrency)
 	filteredChans := make(chan ssh.NewChannel)
 	go func() {
 		defer close(filteredChans)
 		for newCh := range chans {
 			if newCh.ChannelType() == fileRequestChannel {
-				go handleFileRequest(newCh, allow)
+				select {
+				case fileSem <- struct{}{}:
+					go func(nc ssh.NewChannel) {
+						defer func() { <-fileSem }()
+						handleFileRequest(nc, allow)
+					}(newCh)
+				default:
+					_ = newCh.Reject(ssh.ResourceShortage, "too many concurrent file requests")
+				}
 				continue
 			}
 			filteredChans <- newCh
@@ -329,18 +353,17 @@ func handleFileRequest(newCh ssh.NewChannel, allow *allowlist) {
 		go ssh.DiscardRequests(reqs)
 		_, _ = io.Copy(ch, f)
 	case "write":
-		f, err := os.Create(req.Path)
-		if err != nil {
-			_ = newCh.Reject(ssh.Prohibited, err.Error())
-			return
-		}
 		ch, reqs, err := newCh.Accept()
 		if err != nil {
-			f.Close()
 			return
 		}
 		defer ch.Close()
 		go ssh.DiscardRequests(reqs)
+		f, err := os.Create(req.Path)
+		if err != nil {
+			_, _ = io.Copy(io.Discard, ch)
+			return
+		}
 		_, _ = io.Copy(f, ch)
 		_ = f.Close()
 	default:

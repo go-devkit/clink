@@ -53,8 +53,9 @@ type Config struct {
 //
 // ReadFile/OpenFile/WriteFile/CreateFile request files on the client's local
 // filesystem. The client enforces an exact-string allowlist derived from the
-// args it passed to Connect: only paths matching one of those argv strings are
-// served. Anything else is rejected with "path not in allowlist".
+// args it passed to Connect: only paths matching one of those argv strings
+// (or the RHS of any "--name=value" form) are served. Anything else is
+// rejected with "path not in allowlist".
 type Session interface {
 	io.Reader
 	io.Writer
