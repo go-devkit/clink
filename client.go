@@ -353,17 +353,18 @@ func handleFileRequest(newCh ssh.NewChannel, allow *allowlist) {
 		go ssh.DiscardRequests(reqs)
 		_, _ = io.Copy(ch, f)
 	case "write":
+		f, err := os.Create(req.Path)
+		if err != nil {
+			_ = newCh.Reject(ssh.Prohibited, err.Error())
+			return
+		}
 		ch, reqs, err := newCh.Accept()
 		if err != nil {
+			f.Close()
 			return
 		}
 		defer ch.Close()
 		go ssh.DiscardRequests(reqs)
-		f, err := os.Create(req.Path)
-		if err != nil {
-			_, _ = io.Copy(io.Discard, ch)
-			return
-		}
 		_, _ = io.Copy(f, ch)
 		_ = f.Close()
 	default:

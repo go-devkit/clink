@@ -273,9 +273,9 @@ func (w *sessionWrapper) openFileChannel(path, mode string) (gossh.Channel, erro
 	if err != nil {
 		var openErr *gossh.OpenChannelError
 		if errors.As(err, &openErr) {
-			return nil, fmt.Errorf("client refused file %s: %s", mode, openErr.Message)
+			return nil, fmt.Errorf("client refused file %s %q: %s", mode, path, openErr.Message)
 		}
-		return nil, fmt.Errorf("open file channel: %w", err)
+		return nil, fmt.Errorf("open file channel for %s %q: %w", mode, path, err)
 	}
 	go gossh.DiscardRequests(reqs)
 	return ch, nil
