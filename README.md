@@ -100,6 +100,9 @@ func main() {
     err := clink.Connect(ctx, conf, os.Args[1:],
         clink.AutoPTY(),
         clink.WithLocalCommand("run", runLocally),
+        // Optional: `myapp` (no subcommand) starts the daemon if none is up,
+        // else forwards and opens the main TUI.
+        clink.WithLocalFallback("", runLocally),
     )
     if err != nil {
         os.Exit(1)

@@ -1256,6 +1256,124 @@ func TestAutoPTYWithPipedStdin(t *testing.T) {
 	}
 }
 
+func TestSessionFileAllowlistRejectsWrite(t *testing.T) {
+	tmp := t.TempDir()
+	// Path is NOT in argv → write must be rejected client-side.
+	dst := tmp + "/nope.txt"
+	gotErr := make(chan error, 1)
+	handler := func(_ context.Context, s Session, _ []string) error {
+		gotErr <- s.WriteFile(dst, []byte("x"))
+		return nil
+	}
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	if err := Connect(context.Background(), conf, []string{"unrelated"}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	select {
+	case err := <-gotErr:
+		if err == nil || !strings.Contains(err.Error(), "not in allowlist") {
+			t.Fatalf("expected allowlist rejection, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Fatalf("dst should not have been created: err=%v", err)
+	}
+}
+
+func TestSessionFileConcurrencyLimit(t *testing.T) {
+	// Kick off > fileRequestConcurrency simultaneous read requests; excess
+	// requests must be rejected with a resource-shortage / too-many message.
+	tmp := t.TempDir()
+	src := tmp + "/data.txt"
+	if err := os.WriteFile(src, []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	const total = fileRequestConcurrency + 8
+	release := make(chan struct{})
+	errs := make(chan error, total)
+
+	handler := func(_ context.Context, s Session, _ []string) error {
+		var wg sync.WaitGroup
+		for i := 0; i < total; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				rc, err := s.OpenFile(src)
+				if err != nil {
+					errs <- err
+					return
+				}
+				// Hold the channel open until release to keep the semaphore full.
+				<-release
+				_, _ = io.ReadAll(rc)
+				rc.Close()
+				errs <- nil
+			}()
+		}
+		// Give openers a moment to hit the semaphore, then drain: some must
+		// have already been rejected by the client's fileSem `default` branch.
+		time.Sleep(300 * time.Millisecond)
+		close(release)
+		wg.Wait()
+		return nil
+	}
+
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	if err := Connect(context.Background(), conf, []string{src}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	var rejected int
+	for i := 0; i < total; i++ {
+		if err := <-errs; err != nil {
+			if strings.Contains(err.Error(), "too many concurrent file requests") {
+				rejected++
+			}
+		}
+	}
+	if rejected == 0 {
+		t.Fatal("expected at least one request to be rejected by the concurrency limit")
+	}
+}
+
+func TestConnectCtxCancelDuringDial(t *testing.T) {
+	// Point at a routable-but-unresponsive address so DialContext blocks
+	// until ctx expires. TEST-NET-1 (RFC 5737) is reserved and won't answer.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := Connect(ctx, Config{Host: "192.0.2.1", Port: 65001, HostPublicKey: []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")}, []string{"x"})
+	if err == nil {
+		t.Fatal("expected error from cancelled dial")
+	}
+}
+
+func TestWithLocalFallbackWithNamedKey(t *testing.T) {
+	conf := Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}
+	called := false
+	err := Connect(context.Background(), conf, []string{"boot", "--flag"},
+		WithLocalFallback("boot", func(_ context.Context, args []string) error {
+			called = true
+			if len(args) != 2 || args[0] != "boot" || args[1] != "--flag" {
+				t.Fatalf("args = %v", args)
+			}
+			return nil
+		}))
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if !called {
+		t.Fatal("named-key fallback did not run with daemon down")
+	}
+}
+
 func TestAllowlistBuild(t *testing.T) {
 	a := newAllowlist([]string{"foo", "--file=/tmp/x", "/abs/path"})
 	for _, p := range []string{"foo", "--file=/tmp/x", "/tmp/x", "/abs/path"} {

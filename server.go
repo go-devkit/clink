@@ -78,16 +78,16 @@ const fileRequestChannel = "file-request"
 type sessionCtxKey struct{}
 
 // SessionFrom returns the clink.Session attached to ctx by the daemon, or nil
-// if ctx was not produced by a clink handler. Use this in cli actions wrapped
-// with urfave.Wrap/WrapTUI to call Session.ReadFile etc.
+// if ctx was not produced by a clink handler. Use inside CLI actions to
+// reach Session.ReadFile/WriteFile and friends.
 func SessionFrom(ctx context.Context) Session {
 	s, _ := ctx.Value(sessionCtxKey{}).(Session)
 	return s
 }
 
 // WithSession attaches s to ctx so handlers reachable via SessionFrom can use
-// it. The daemon dispatcher (e.g. urfave.Serve) is responsible for calling
-// this before running the cli command.
+// it. The daemon-side dispatcher (whatever runs the CLI framework's command
+// tree) is responsible for calling this before invoking actions.
 func WithSession(ctx context.Context, s Session) context.Context {
 	return context.WithValue(ctx, sessionCtxKey{}, s)
 }
