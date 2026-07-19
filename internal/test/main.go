@@ -85,6 +85,37 @@ func commands() []*cli.Command {
 				return nil
 			},
 		},
+		{
+			Name:      "cp",
+			Usage:     "Server-initiated copy of a client-side file: cp <src> <dst>",
+			ArgsUsage: "<src> <dst>",
+			Action: func(ctx context.Context, cmd *cli.Command) error {
+				s := clink.SessionFrom(ctx)
+				if s == nil {
+					return fmt.Errorf("no clink session on ctx")
+				}
+
+				if cmd.Args().Len() != 2 {
+					return fmt.Errorf("usage: cp <src> <dst>")
+				}
+
+				src := cmd.Args().Get(0)
+				dst := cmd.Args().Get(1)
+
+				data, err := s.ReadFile(src)
+				if err != nil {
+					return fmt.Errorf("read %s: %w", src, err)
+				}
+
+				if err := s.WriteFile(dst, data); err != nil {
+					return fmt.Errorf("write %s: %w", dst, err)
+				}
+
+				fmt.Fprintf(cmd.Writer, "copied %d bytes: %s -> %s\n", len(data), src, dst)
+
+				return nil
+			},
+		},
 	}
 }
 
