@@ -1,2 +1,4 @@
 [tools]
-go = "1.25.9"
+git-cliff = "2.13.1"
+go = "1.26.5"
+golangci-lint = "2.12.2"
