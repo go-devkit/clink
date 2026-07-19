@@ -356,7 +356,7 @@ func TestStdinPipingViaSSH(t *testing.T) {
 		t.Fatal(err)
 	}
 	go func() {
-		io.WriteString(stdin, "hello world")
+		_, _ = io.WriteString(stdin, "hello world")
 		stdin.Close()
 	}()
 	out, err := io.ReadAll(stdout)
@@ -573,12 +573,12 @@ func TestConnectStdinPiping(t *testing.T) {
 	t.Cleanup(func() { os.Stdin, os.Stdout, os.Stderr = origIn, origOut, origErr })
 
 	go func() {
-		io.WriteString(stdinW, "piped input")
+		_, _ = io.WriteString(stdinW, "piped input")
 		stdinW.Close()
 	}()
 
 	// Drain stderr so a hypothetical write doesn't block.
-	go io.Copy(io.Discard, stderrR)
+	go func() { _, _ = io.Copy(io.Discard, stderrR) }()
 
 	outCh := make(chan []byte, 1)
 	go func() {
@@ -1289,7 +1289,11 @@ func TestSessionFileConcurrencyLimit(t *testing.T) {
 	// requests must be rejected with a resource-shortage / too-many message.
 	tmp := t.TempDir()
 	src := tmp + "/data.txt"
-	if err := os.WriteFile(src, []byte("hi"), 0o644); err != nil {
+	// Payload must exceed the SSH flow-control window so the client's io.Copy
+	// blocks until the reader drains it; otherwise a small file is written to
+	// the channel buffer instantly and the semaphore slot frees before the
+	// other openers pile up, making the concurrency check flaky.
+	if err := os.WriteFile(src, make([]byte, 1<<20), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
