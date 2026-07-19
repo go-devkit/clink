@@ -106,7 +106,12 @@ func Connect(ctx context.Context, conf Config, args []string, opts ...ConnectOpt
 
 	if fn, ok := co.locals[key]; ok {
 		if daemonReachable(conf) {
-			return fmt.Errorf("clink: daemon already running on %s:%d; refusing to run local command %q", conf.Host, conf.Port, key)
+			host, err := normalizeHost(conf.Host)
+			if err != nil {
+				host = conf.Host
+			}
+
+			return fmt.Errorf("clink: something is already listening on %s:%d; refusing to run local command %q", host, conf.Port, key)
 		}
 
 		return fn(ctx, args)
@@ -207,8 +212,9 @@ func Connect(ctx context.Context, conf Config, args []string, opts ...ConnectOpt
 }
 
 // interceptFileChannels pulls file-request channels off the incoming stream
-// and dispatches each through a bounded worker pool. Non-file channels pass
-// through untouched to the returned channel.
+// and dispatches each in its own goroutine, capped by a semaphore so a rogue
+// server can't exhaust FDs. Non-file channels pass through untouched to the
+// returned channel.
 func interceptFileChannels(chans <-chan ssh.NewChannel, allow *allowlist) <-chan ssh.NewChannel {
 	out := make(chan ssh.NewChannel)
 	sem := make(chan struct{}, fileRequestConcurrency)

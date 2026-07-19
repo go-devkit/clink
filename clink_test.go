@@ -1194,7 +1194,7 @@ func TestWithLocalCommandRefusesWhenDaemonUp(t *testing.T) {
 			t.Fatal("local fn should not run when daemon is up")
 			return nil
 		}))
-	if err == nil || !strings.Contains(err.Error(), "already running") {
+	if err == nil || !strings.Contains(err.Error(), "already listening") {
 		t.Fatalf("expected refusal, got %v", err)
 	}
 }
@@ -1317,7 +1317,7 @@ func TestSessionFileConcurrencyLimit(t *testing.T) {
 		}
 		// Give openers a moment to hit the semaphore, then drain: some must
 		// have already been rejected by the client's fileSem `default` branch.
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 		close(release)
 		wg.Wait()
 		return nil

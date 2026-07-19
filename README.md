@@ -32,7 +32,8 @@ type Session interface {
     // File forwarding: server reads/writes files on the client's local
     // filesystem. The client enforces an exact-string allowlist derived from
     // the args it passed to Connect — only paths matching one of those argv
-    // strings (or the RHS of "--name=value") are served.
+    // strings (or the RHS of any "-"-prefixed "key=value" arg, e.g.
+    // "--file=/tmp/x" or "-f=/tmp/x") are served.
     ReadFile(path string) ([]byte, error)
     OpenFile(path string) (io.ReadCloser, error)
     WriteFile(path string, data []byte) error
