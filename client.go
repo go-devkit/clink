@@ -338,8 +338,9 @@ func daemonReachable(conf Config) bool {
 }
 
 // allowlist is the set of path strings the server is permitted to ReadFile /
-// WriteFile against. Built from the args passed to Connect: every arg, plus
-// the RHS of any "--name=value" form, is added verbatim. Match is exact.
+// WriteFile against. Built from the args passed to Connect: every arg is
+// added verbatim, and if the arg begins with "-" the RHS of an "=" form is
+// added too (so "--file=/tmp/x" allowlists "/tmp/x"). Match is exact.
 type allowlist struct {
 	paths map[string]struct{}
 }
@@ -348,6 +349,10 @@ func newAllowlist(args []string) *allowlist {
 	a := &allowlist{paths: make(map[string]struct{}, len(args))}
 	for _, arg := range args {
 		a.paths[arg] = struct{}{}
+
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
 
 		if i := strings.Index(arg, "="); i > 0 {
 			a.paths[arg[i+1:]] = struct{}{}

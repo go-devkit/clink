@@ -1386,6 +1386,20 @@ func TestAllowlistBuild(t *testing.T) {
 	}
 }
 
+func TestAllowlistPositionalEqualsDoesNotSplit(t *testing.T) {
+	a := newAllowlist([]string{"foo=bar", "-s=short", "--long=val"})
+
+	for _, p := range []string{"foo=bar", "-s=short", "--long=val", "short", "val"} {
+		if !a.allowed(p) {
+			t.Errorf("allowlist missing %q", p)
+		}
+	}
+
+	if a.allowed("bar") {
+		t.Error("positional foo=bar must not allowlist the RHS bar")
+	}
+}
+
 func TestWithPTYDoesNotForceInteractive(t *testing.T) {
 	// Handler does NOT return Interactive; even with PTY allocated, normal
 	// command path should run and produce stdout.
