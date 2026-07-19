@@ -5,7 +5,7 @@ go 1.26.2
 require (
 	charm.land/bubbletea/v2 v2.0.6
 	github.com/go-devkit/clink v0.0.0
-	github.com/urfave/cli/v3 v3.8.0
+	github.com/urfave/cli/v3 v3.9.0
 )
 
 require (

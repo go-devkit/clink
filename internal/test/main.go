@@ -12,55 +12,28 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-var defaultConf = clink.Config{
+var conf = clink.Config{
 	Port:     2222,
 	Password: "test",
 }
 
 func main() {
-	cmd := &cli.Command{
-		Name: "testapp",
-		Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
-			if cmd.Args().First() == "serve" {
-				return ctx, nil
-			}
-
-			conf := clink.Config{
-				Host:     cmd.String("host"),
-				Port:     int(cmd.Int("port")),
-				Password: cmd.String("password"),
-			}
-
-			if err := clink.Connect(conf, cmd.Args().Slice()); err != nil {
-				return ctx, fmt.Errorf("server connection failed: %w", err)
-			}
-
-			return ctx, cli.Exit("", 0)
-		},
-		Flags: []cli.Flag{
-			&cli.StringFlag{Name: "host", Value: "127.0.0.1"},
-			&cli.IntFlag{Name: "port", Value: 2222},
-			&cli.StringFlag{Name: "password", Value: "test"},
-		},
-		Commands: commands(),
-	}
-
-	cmd.Commands = append(cmd.Commands, &cli.Command{
-		Name:  "serve",
-		Usage: "Start the SSH server",
-		Action: func(ctx context.Context, cmd *cli.Command) error {
-			fmt.Println("starting server on :2222")
-			return clink.Listen(ctx, defaultConf, newHandler())
-		},
-	})
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := cmd.Run(ctx, os.Args); err != nil {
+	err := clink.Connect(ctx, conf, os.Args[1:],
+		clink.AutoPTY(),
+		clink.WithLocalCommand("serve", runServer),
+	)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func runServer(ctx context.Context, _ []string) error {
+	fmt.Println("starting server on :2222")
+	return clink.Listen(ctx, conf, newHandler())
 }
 
 func newHandler() clink.Handler {
@@ -73,24 +46,13 @@ func newHandler() clink.Handler {
 			Name:     "testapp",
 			Commands: commands(),
 		}
-
-		propagateWriter(s, cmd)
+		cmd.Reader, cmd.Writer, cmd.ErrWriter = s, s, s.Stderr()
 
 		if cmd.Command(args[0]) == nil {
 			return clink.ErrNotHandled
 		}
 
-		return cmd.Run(ctx, append([]string{cmd.Name}, args...))
-	}
-}
-
-func propagateWriter(s clink.Session, cmd *cli.Command) {
-	cmd.Reader = s
-	cmd.Writer = s
-	cmd.ErrWriter = s.Stderr()
-
-	for _, sub := range cmd.Commands {
-		propagateWriter(s, sub)
+		return cmd.Run(clink.WithSession(ctx, s), append([]string{cmd.Name}, args...))
 	}
 }
 
@@ -120,6 +82,37 @@ func commands() []*cli.Command {
 			Usage: "Print version",
 			Action: func(ctx context.Context, cmd *cli.Command) error {
 				fmt.Fprintln(cmd.Writer, "testapp v0.1.0")
+				return nil
+			},
+		},
+		{
+			Name:      "cp",
+			Usage:     "Server-initiated copy of a client-side file: cp <src> <dst>",
+			ArgsUsage: "<src> <dst>",
+			Action: func(ctx context.Context, cmd *cli.Command) error {
+				s := clink.SessionFrom(ctx)
+				if s == nil {
+					return fmt.Errorf("no clink session on ctx")
+				}
+
+				if cmd.Args().Len() != 2 {
+					return fmt.Errorf("usage: cp <src> <dst>")
+				}
+
+				src := cmd.Args().Get(0)
+				dst := cmd.Args().Get(1)
+
+				data, err := s.ReadFile(src)
+				if err != nil {
+					return fmt.Errorf("read %s: %w", src, err)
+				}
+
+				if err := s.WriteFile(dst, data); err != nil {
+					return fmt.Errorf("write %s: %w", dst, err)
+				}
+
+				fmt.Fprintf(cmd.Writer, "copied %d bytes: %s -> %s\n", len(data), src, dst)
+
 				return nil
 			},
 		},

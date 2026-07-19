@@ -1,22 +1,33 @@
 package clink
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/keygen"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
 
-// ConnectOption configures Connect. See WithPTY.
+// fileRequestConcurrency caps how many client-side file transfers can run at
+// once per Connect. Excess requests are rejected with ResourceShortage rather
+// than spawning unbounded goroutines / file descriptors.
+const fileRequestConcurrency = 32
+
+// ConnectOption configures Connect. See WithPTY, AutoPTY, WithLocalCommand.
 type ConnectOption func(*connectOpts)
 
 type connectOpts struct {
-	pty bool
+	pty       bool
+	locals    map[string]func(context.Context, []string) error
+	fallbacks map[string]func(context.Context, []string) error
 }
 
 // WithPTY makes Connect allocate a PTY for the command session, enabling
@@ -24,15 +35,90 @@ type connectOpts struct {
 // that command. Without it, Interactive returns from Handler will fail
 // with an exit-1 message on the server.
 func WithPTY() ConnectOption {
-	return func(o *connectOpts) { o.pty = true }
+	return func(o *connectOpts) {
+		o.pty = true
+	}
+}
+
+// AutoPTY makes Connect allocate a PTY when os.Stdin is a terminal, and
+// skip PTY allocation when stdin is piped/redirected. This mirrors what
+// ssh does by default and lets a single Connect call handle both TUI
+// subcommands (tty stdin) and pipe-friendly non-TUI subcommands.
+func AutoPTY() ConnectOption {
+	return func(o *connectOpts) {
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			return
+		}
+
+		o.pty = true
+	}
+}
+
+// WithLocalCommand registers a command that must not be forwarded to the
+// daemon. If args[0] matches name (or name == "" and args is empty), Connect
+// calls fn instead of dialing. Connect returns an error if a daemon is already
+// reachable, to prevent a double-run — use WithLocalFallback for
+// forward-if-up / run-if-down semantics.
+func WithLocalCommand(name string, fn func(context.Context, []string) error) ConnectOption {
+	return func(o *connectOpts) {
+		if o.locals == nil {
+			o.locals = make(map[string]func(context.Context, []string) error)
+		}
+
+		o.locals[name] = fn
+	}
+}
+
+// WithLocalFallback registers a command that runs locally only when no daemon
+// is reachable. If args[0] matches name (or name == "" and args is empty) and
+// the daemon is up, Connect forwards as usual; if the daemon is down, fn runs
+// instead. Typical use: no-args entry that opens the TUI when the daemon is
+// running and starts the daemon otherwise.
+func WithLocalFallback(name string, fn func(context.Context, []string) error) ConnectOption {
+	return func(o *connectOpts) {
+		if o.fallbacks == nil {
+			o.fallbacks = make(map[string]func(context.Context, []string) error)
+		}
+
+		o.fallbacks[name] = fn
+	}
 }
 
 // Connect sends args to the running daemon.
 // If args is empty, it opens an interactive TUI session.
-func Connect(conf Config, args []string, opts ...ConnectOption) error {
+// If args[0] matches a WithLocalCommand name, Connect first checks that no
+// daemon is already reachable on the configured host/port; if one is, Connect
+// returns an error to prevent a double-run. Otherwise it invokes the local
+// handler instead of dialing.
+// ctx is used for the local-command handler and for cancelling the
+// connection setup (dial + handshake); it does not currently cancel an
+// in-flight remote command — the SSH session runs to completion.
+func Connect(ctx context.Context, conf Config, args []string, opts ...ConnectOption) error {
 	var co connectOpts
 	for _, o := range opts {
 		o(&co)
+	}
+
+	key := ""
+	if len(args) > 0 {
+		key = args[0]
+	}
+
+	if fn, ok := co.locals[key]; ok {
+		if daemonReachable(conf) {
+			host, err := normalizeHost(conf.Host)
+			if err != nil {
+				host = conf.Host
+			}
+
+			return fmt.Errorf("clink: something is already listening on %s:%d; refusing to run local command %q", host, conf.Port, key)
+		}
+
+		return fn(ctx, args)
+	}
+
+	if fn, ok := co.fallbacks[key]; ok && !daemonReachable(conf) {
+		return fn(ctx, args)
 	}
 
 	host, err := normalizeHost(conf.Host)
@@ -60,10 +146,34 @@ func Connect(conf Config, args []string, opts ...ConnectOption) error {
 		HostKeyCallback: hostKeyCallback,
 	}
 
-	conn, err := ssh.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(conf.Port)), config)
+	addr := net.JoinHostPort(host, strconv.Itoa(conf.Port))
+
+	dialer := net.Dialer{Timeout: 10 * time.Second}
+	tcpConn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
+
+	handshakeDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = tcpConn.Close()
+		case <-handshakeDone:
+		}
+	}()
+
+	sshConn, chans, reqs, err := ssh.NewClientConn(tcpConn, addr, config)
+	close(handshakeDone)
+	if err != nil {
+		_ = tcpConn.Close()
+		return fmt.Errorf("failed to connect: %w", err)
+	}
+
+	allow := newAllowlist(args)
+	filteredChans := interceptFileChannels(chans, allow)
+
+	conn := ssh.NewClient(sshConn, filteredChans, reqs)
 	defer conn.Close()
 
 	session, err := conn.NewSession()
@@ -77,7 +187,6 @@ func Connect(conf Config, args []string, opts ...ConnectOption) error {
 	session.Stderr = os.Stderr
 
 	interactive := len(args) == 0 || co.pty
-
 	if interactive {
 		restore, err := setupClientPTY(session)
 		if err != nil {
@@ -90,6 +199,7 @@ func Connect(conf Config, args []string, opts ...ConnectOption) error {
 		if err := session.Shell(); err != nil {
 			return fmt.Errorf("failed to start shell: %w", err)
 		}
+
 		return session.Wait()
 	}
 
@@ -97,7 +207,40 @@ func Connect(conf Config, args []string, opts ...ConnectOption) error {
 	for i, arg := range args {
 		quoted[i] = shellQuote(arg)
 	}
+
 	return session.Run(strings.Join(quoted, " "))
+}
+
+// interceptFileChannels pulls file-request channels off the incoming stream
+// and dispatches each in its own goroutine, capped by a semaphore so a rogue
+// server can't exhaust FDs. Non-file channels pass through untouched to the
+// returned channel.
+func interceptFileChannels(chans <-chan ssh.NewChannel, allow *allowlist) <-chan ssh.NewChannel {
+	out := make(chan ssh.NewChannel)
+	sem := make(chan struct{}, fileRequestConcurrency)
+
+	go func() {
+		defer close(out)
+
+		for newCh := range chans {
+			if newCh.ChannelType() != fileRequestChannel {
+				out <- newCh
+				continue
+			}
+
+			select {
+			case sem <- struct{}{}:
+				go func(nc ssh.NewChannel) {
+					defer func() { <-sem }()
+					handleFileRequest(nc, allow)
+				}(newCh)
+			default:
+				_ = newCh.Reject(ssh.ResourceShortage, "too many concurrent file requests")
+			}
+		}
+	}()
+
+	return out
 }
 
 // setupClientPTY puts os.Stdin in raw mode and requests a PTY on the SSH
@@ -107,7 +250,10 @@ func setupClientPTY(session *ssh.Session) (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to set raw mode: %w", err)
 	}
-	restore := func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }
+
+	restore := func() {
+		_ = term.Restore(int(os.Stdin.Fd()), oldState)
+	}
 
 	width, height, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil {
@@ -129,10 +275,12 @@ func setupClientPTY(session *ssh.Session) (func(), error) {
 		ssh.IMAXBEL:       0,
 		ssh.IUTF8:         1,
 	}
+
 	if err := session.RequestPty(termType, height, width, modes); err != nil {
 		restore()
 		return nil, fmt.Errorf("failed to request PTY: %w", err)
 	}
+
 	return restore, nil
 }
 
@@ -166,9 +314,125 @@ func hostKeyCallback(conf Config) (ssh.HostKeyCallback, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse HostPublicKey: %w", err)
 	}
+
 	return ssh.FixedHostKey(pub), nil
 }
 
 func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+	quoted := strings.ReplaceAll(s, "'", "'\\''")
+
+	return "'" + quoted + "'"
+}
+
+// daemonReachable does a quick TCP dial to see whether something is already
+// listening on the configured host/port. Used to refuse local-command
+// dispatch when the daemon is already running.
+func daemonReachable(conf Config) bool {
+	host, err := normalizeHost(conf.Host)
+	if err != nil {
+		return false
+	}
+
+	addr := net.JoinHostPort(host, strconv.Itoa(conf.Port))
+	c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+
+	return true
+}
+
+// allowlist is the set of path strings the server is permitted to ReadFile /
+// WriteFile against. Built from the args passed to Connect: every arg is
+// added verbatim, and if the arg begins with "-" the RHS of an "=" form is
+// added too (so "--file=/tmp/x" allowlists "/tmp/x"). Match is exact.
+type allowlist struct {
+	paths map[string]struct{}
+}
+
+func newAllowlist(args []string) *allowlist {
+	a := &allowlist{paths: make(map[string]struct{}, len(args))}
+	for _, arg := range args {
+		a.paths[arg] = struct{}{}
+
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
+
+		if i := strings.Index(arg, "="); i > 0 {
+			a.paths[arg[i+1:]] = struct{}{}
+		}
+	}
+
+	return a
+}
+
+func (a *allowlist) allowed(path string) bool {
+	_, ok := a.paths[path]
+
+	return ok
+}
+
+func handleFileRequest(newCh ssh.NewChannel, allow *allowlist) {
+	var req fileRequest
+	if err := json.Unmarshal(newCh.ExtraData(), &req); err != nil {
+		_ = newCh.Reject(ssh.UnknownChannelType, "invalid file request payload")
+		return
+	}
+
+	if !allow.allowed(req.Path) {
+		_ = newCh.Reject(ssh.Prohibited, "path not in allowlist: "+req.Path)
+		return
+	}
+
+	switch req.Mode {
+	case "read":
+		serveFileRead(newCh, req.Path)
+
+	case "write":
+		serveFileWrite(newCh, req.Path)
+
+	default:
+		_ = newCh.Reject(ssh.UnknownChannelType, "unknown file request mode: "+req.Mode)
+	}
+}
+
+func serveFileRead(newCh ssh.NewChannel, path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		_ = newCh.Reject(ssh.Prohibited, err.Error())
+		return
+	}
+	defer f.Close()
+
+	ch, reqs, err := newCh.Accept()
+	if err != nil {
+		return
+	}
+	defer ch.Close()
+
+	go ssh.DiscardRequests(reqs)
+
+	_, _ = io.Copy(ch, f)
+}
+
+func serveFileWrite(newCh ssh.NewChannel, path string) {
+	f, err := os.Create(path)
+	if err != nil {
+		_ = newCh.Reject(ssh.Prohibited, err.Error())
+		return
+	}
+
+	ch, reqs, err := newCh.Accept()
+	if err != nil {
+		f.Close()
+		return
+	}
+	defer ch.Close()
+
+	go ssh.DiscardRequests(reqs)
+
+	_, _ = io.Copy(f, ch)
+	_ = f.Close()
 }

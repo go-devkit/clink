@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"charm.land/wish/v2/bubbletea"
 	"github.com/charmbracelet/keygen"
 	"github.com/charmbracelet/ssh"
+	gossh "golang.org/x/crypto/ssh"
 )
 
 // Config holds the connection settings for Listen and Connect.
@@ -48,10 +50,47 @@ type Config struct {
 }
 
 // Session provides I/O for command handlers.
+//
+// ReadFile/OpenFile/WriteFile/CreateFile request files on the client's local
+// filesystem. The client enforces an exact-string allowlist derived from the
+// args it passed to Connect: only paths matching one of those argv strings
+// (or the RHS of any "-"-prefixed "key=value" arg, e.g. "--file=/tmp/x" or
+// "-f=/tmp/x") are served. Anything else is rejected with "path not in
+// allowlist".
 type Session interface {
 	io.Reader
 	io.Writer
 	Stderr() io.Writer
+
+	ReadFile(path string) ([]byte, error)
+	OpenFile(path string) (io.ReadCloser, error)
+	WriteFile(path string, data []byte) error
+	CreateFile(path string) (io.WriteCloser, error)
+}
+
+// fileRequest is the channel-open payload for file-request channels.
+type fileRequest struct {
+	Path string `json:"path"`
+	Mode string `json:"mode"` // "read" or "write"
+}
+
+const fileRequestChannel = "file-request"
+
+type sessionCtxKey struct{}
+
+// SessionFrom returns the clink.Session attached to ctx by the daemon, or nil
+// if ctx was not produced by a clink handler. Use inside CLI actions to
+// reach Session.ReadFile/WriteFile and friends.
+func SessionFrom(ctx context.Context) Session {
+	s, _ := ctx.Value(sessionCtxKey{}).(Session)
+	return s
+}
+
+// WithSession attaches s to ctx so handlers reachable via SessionFrom can use
+// it. The daemon-side dispatcher (whatever runs the CLI framework's command
+// tree) is responsible for calling this before invoking actions.
+func WithSession(ctx context.Context, s Session) context.Context {
+	return context.WithValue(ctx, sessionCtxKey{}, s)
 }
 
 // Handler processes a CLI command received from a connected client.
@@ -79,7 +118,9 @@ func (e *ExitError) Error() string {
 	return fmt.Sprintf("exit status %d", e.Code)
 }
 
-func (e *ExitError) Unwrap() error { return e.Err }
+func (e *ExitError) Unwrap() error {
+	return e.Err
+}
 
 // Interactive is returned by a Handler to launch a Bubble Tea TUI.
 // Empty-args sessions: the client already allocates a PTY before opening
@@ -90,7 +131,9 @@ type Interactive struct {
 	Opts  []tea.ProgramOption
 }
 
-func (*Interactive) Error() string { return "clink: interactive session" }
+func (*Interactive) Error() string {
+	return "clink: interactive session"
+}
 
 // Listen starts the daemon and handles incoming CLI commands and TUI sessions.
 // Handler receives empty args for interactive (no-args) clients and can return
@@ -128,6 +171,7 @@ func Listen(ctx context.Context, conf Config, handler Handler) error {
 		expected := sha256.Sum256([]byte(conf.Password))
 		opts = append(opts, wish.WithPasswordAuth(func(_ ssh.Context, pass string) bool {
 			got := sha256.Sum256([]byte(pass))
+
 			return subtle.ConstantTimeCompare(got[:], expected[:]) == 1
 		}))
 	} else {
@@ -149,6 +193,7 @@ func Listen(ctx context.Context, conf Config, handler Handler) error {
 	select {
 	case err := <-errCh:
 		return err
+
 	case <-ctx.Done():
 		shutdownErr := s.Shutdown(context.Background())
 		if err := <-errCh; err != nil && !errors.Is(err, ssh.ErrServerClosed) {
@@ -157,6 +202,7 @@ func Listen(ctx context.Context, conf Config, handler Handler) error {
 		if shutdownErr != nil {
 			return shutdownErr
 		}
+
 		return nil
 	}
 }
@@ -165,13 +211,13 @@ func handleCLI(parent context.Context, handler Handler) wish.Middleware {
 	return func(next ssh.Handler) ssh.Handler {
 		return func(s ssh.Session) {
 			args := s.Command()
-
 			if len(args) > 0 && args[0] == "--" {
 				args = args[1:]
 			}
 
 			ctx, cancel := context.WithCancel(parent)
 			defer cancel()
+
 			go func() {
 				select {
 				case <-s.Context().Done():
@@ -180,7 +226,8 @@ func handleCLI(parent context.Context, handler Handler) wish.Middleware {
 				}
 			}()
 
-			err := handler(ctx, &sessionWrapper{s}, args)
+			conn, _ := s.Context().Value(ssh.ContextKeyConn).(*gossh.ServerConn)
+			err := handler(ctx, &sessionWrapper{s: s, conn: conn}, args)
 			if err == nil {
 				return
 			}
@@ -196,6 +243,7 @@ func handleCLI(parent context.Context, handler Handler) wish.Middleware {
 
 			code := 1
 			msg := err.Error()
+
 			var exit *ExitError
 			if errors.As(err, &exit) {
 				code = exit.Code
@@ -203,9 +251,11 @@ func handleCLI(parent context.Context, handler Handler) wish.Middleware {
 					msg = ""
 				}
 			}
+
 			if msg != "" {
 				fmt.Fprintf(s.Stderr(), "%v\n", msg)
 			}
+
 			if err := s.Exit(code); err != nil {
 				fmt.Fprintf(s.Stderr(), "%v\n", err)
 			}
@@ -214,12 +264,103 @@ func handleCLI(parent context.Context, handler Handler) wish.Middleware {
 }
 
 type sessionWrapper struct {
-	s ssh.Session
+	s    ssh.Session
+	conn *gossh.ServerConn
 }
 
-func (w *sessionWrapper) Read(p []byte) (int, error)  { return w.s.Read(p) }
-func (w *sessionWrapper) Write(p []byte) (int, error) { return w.s.Write(p) }
-func (w *sessionWrapper) Stderr() io.Writer            { return w.s.Stderr() }
+func (w *sessionWrapper) Read(p []byte) (int, error) {
+	return w.s.Read(p)
+}
+
+func (w *sessionWrapper) Write(p []byte) (int, error) {
+	return w.s.Write(p)
+}
+
+func (w *sessionWrapper) Stderr() io.Writer {
+	return w.s.Stderr()
+}
+
+func (w *sessionWrapper) openFileChannel(path, mode string) (gossh.Channel, error) {
+	if w.conn == nil {
+		return nil, errors.New("clink: no client connection available for file transfer")
+	}
+
+	payload, err := json.Marshal(fileRequest{Path: path, Mode: mode})
+	if err != nil {
+		return nil, fmt.Errorf("marshal file request: %w", err)
+	}
+
+	ch, reqs, err := w.conn.OpenChannel(fileRequestChannel, payload)
+	if err != nil {
+		var openErr *gossh.OpenChannelError
+		if errors.As(err, &openErr) {
+			return nil, fmt.Errorf("client refused file %s %q: %s", mode, path, openErr.Message)
+		}
+
+		return nil, fmt.Errorf("open file channel for %s %q: %w", mode, path, err)
+	}
+
+	go gossh.DiscardRequests(reqs)
+
+	return ch, nil
+}
+
+func (w *sessionWrapper) ReadFile(path string) ([]byte, error) {
+	rc, err := w.OpenFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+
+	return io.ReadAll(rc)
+}
+
+func (w *sessionWrapper) OpenFile(path string) (io.ReadCloser, error) {
+	ch, err := w.openFileChannel(path, "read")
+	if err != nil {
+		return nil, err
+	}
+
+	return ch, nil
+}
+
+func (w *sessionWrapper) WriteFile(path string, data []byte) error {
+	wc, err := w.CreateFile(path)
+	if err != nil {
+		return err
+	}
+
+	if _, err := wc.Write(data); err != nil {
+		wc.Close()
+		return err
+	}
+
+	return wc.Close()
+}
+
+func (w *sessionWrapper) CreateFile(path string) (io.WriteCloser, error) {
+	ch, err := w.openFileChannel(path, "write")
+	if err != nil {
+		return nil, err
+	}
+
+	return &writeChannel{ch: ch}, nil
+}
+
+// writeChannel wraps a gossh.Channel so Close sends EOF (signals end-of-write
+// to the client) before closing the full channel.
+type writeChannel struct {
+	ch gossh.Channel
+}
+
+func (w *writeChannel) Write(p []byte) (int, error) {
+	return w.ch.Write(p)
+}
+
+func (w *writeChannel) Close() error {
+	_ = w.ch.CloseWrite()
+	return w.ch.Close()
+}
 
 // normalizeHost applies the shared Host handling for Listen and Connect:
 // defaulting empty to 127.0.0.1, trimming a single pair of IPv6 brackets,
@@ -228,20 +369,25 @@ func normalizeHost(host string) (string, error) {
 	if host == "" {
 		host = "127.0.0.1"
 	}
+
 	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
 		host = host[1 : len(host)-1]
 	}
+
 	if host == "" {
 		return "", fmt.Errorf("host must not be empty after normalization")
 	}
+
 	if _, _, err := net.SplitHostPort(host); err == nil {
 		return "", fmt.Errorf("host must not include a port: %q", host)
 	}
+
 	return host, nil
 }
 
 func isLoopback(host string) bool {
 	ip := net.ParseIP(host)
+
 	return ip != nil && ip.IsLoopback()
 }
 
@@ -253,24 +399,30 @@ func runInteractive(s ssh.Session, i *Interactive) {
 		_ = s.Exit(1)
 		return
 	}
+
 	pty, winch, ok := s.Pty()
 	if !ok {
 		fmt.Fprintln(s.Stderr(), "clink: interactive command requires a PTY (use clink.WithPTY)")
 		_ = s.Exit(1)
 		return
 	}
+
 	opts := append([]tea.ProgramOption(nil), i.Opts...)
 	opts = append(opts, tea.WithWindowSize(pty.Window.Width, pty.Window.Height))
 	opts = append(opts, bubbletea.MakeOptions(s)...)
+
 	p := tea.NewProgram(i.Model, opts...)
+
 	ctx, cancel := context.WithCancel(s.Context())
 	defer cancel()
+
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
 				p.Quit()
 				return
+
 			case w, ok := <-winch:
 				if !ok {
 					return
@@ -279,13 +431,13 @@ func runInteractive(s ssh.Session, i *Interactive) {
 			}
 		}
 	}()
+
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(s.Stderr(), "clink: TUI exited with error: %v\n", err)
 		p.Kill()
 		_ = s.Exit(1)
 		return
 	}
+
 	p.Kill()
 }
-
-
