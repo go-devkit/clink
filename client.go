@@ -7,8 +7,10 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/keygen"
@@ -91,8 +93,11 @@ func WithLocalFallback(name string, fn func(context.Context, []string) error) Co
 // returns an error to prevent a double-run. Otherwise it invokes the local
 // handler instead of dialing.
 // ctx is used for the local-command handler and for cancelling the
-// connection setup (dial + handshake); it does not currently cancel an
-// in-flight remote command — the SSH session runs to completion.
+// connection setup (dial + handshake); it does not itself cancel an in-flight
+// remote command. To cancel a running non-PTY command, deliver SIGINT/SIGTERM
+// to the client process — Connect forwards it to the daemon, which cancels the
+// handler's context. PTY sessions deliver Ctrl-C in-band and forward terminal
+// resizes (SIGWINCH) to the server-side TUI.
 func Connect(ctx context.Context, conf Config, args []string, opts ...ConnectOption) error {
 	var co connectOpts
 	for _, o := range opts {
@@ -193,6 +198,12 @@ func Connect(ctx context.Context, conf Config, args []string, opts ...ConnectOpt
 			return err
 		}
 		defer restore()
+
+		stopWinch := forwardWinch(session)
+		defer stopWinch()
+	} else {
+		stopSignals := forwardSignals(session)
+		defer stopSignals()
 	}
 
 	if len(args) == 0 {
@@ -282,6 +293,66 @@ func setupClientPTY(session *ssh.Session) (func(), error) {
 	}
 
 	return restore, nil
+}
+
+// forwardSignals relays client-side SIGINT/SIGTERM to the remote session so
+// the server can cancel the per-session handler context. Used for non-PTY
+// command sessions; PTY sessions deliver Ctrl-C in-band as a byte instead.
+// The returned func stops forwarding.
+func forwardSignals(session *ssh.Session) func() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case s := <-ch:
+				switch s {
+				case os.Interrupt:
+					_ = session.Signal(ssh.SIGINT)
+				case syscall.SIGTERM:
+					_ = session.Signal(ssh.SIGTERM)
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	return func() {
+		signal.Stop(ch)
+		close(done)
+	}
+}
+
+// forwardWinch relays client-side SIGWINCH to the remote PTY session so the
+// server-side TUI resizes, sending the current terminal size on each change.
+// The returned func stops forwarding.
+func forwardWinch(session *ssh.Session) func() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGWINCH)
+
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-ch:
+				width, height, err := term.GetSize(int(os.Stdout.Fd()))
+				if err != nil {
+					continue
+				}
+				_ = session.WindowChange(height, width)
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	return func() {
+		signal.Stop(ch)
+		close(done)
+	}
 }
 
 // clientAuth returns the SSH auth methods for Connect.
