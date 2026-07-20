@@ -99,6 +99,12 @@ func WithSession(ctx context.Context, s Session) context.Context {
 // Return ErrNotHandled if the command is not recognized — the session closes.
 // Return *ExitError to set a custom remote exit code.
 // Return *Interactive to launch a Bubble Tea TUI for this command.
+//
+// ctx is the command's lifetime: it is cancelled when the client disconnects
+// and when the client forwards SIGINT/SIGTERM (Ctrl-C on a non-PTY command).
+// Work that must outlive the request — e.g. a background task the client only
+// kicks off — must not use ctx; spawn it with the daemon's own root context
+// instead.
 type Handler func(ctx context.Context, s Session, args []string) error
 
 // ErrNotHandled is returned by a Handler to indicate the command was not recognized.
@@ -223,6 +229,21 @@ func handleCLI(parent context.Context, handler Handler) wish.Middleware {
 				case <-s.Context().Done():
 					cancel()
 				case <-ctx.Done():
+				}
+			}()
+
+			sigs := make(chan ssh.Signal, 1)
+			s.Signals(sigs)
+			go func() {
+				for {
+					select {
+					case sig := <-sigs:
+						if sig == ssh.SIGINT || sig == ssh.SIGTERM {
+							cancel()
+						}
+					case <-s.Context().Done():
+						return
+					}
 				}
 			}()
 
