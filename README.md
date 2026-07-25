@@ -51,6 +51,8 @@ type Handler func(ctx context.Context, s Session, args []string) error
 //   return &clink.Interactive{Model: dashboard.New()}
 //   (subcommand TUIs require the client to call Connect with clink.WithPTY)
 // ctx is cancelled when the client disconnects.
+// Handler runs on one goroutine per session, concurrently with other sessions —
+// it and everything it closes over must be goroutine-safe. See "Concurrency".
 
 // Daemon side: listen for incoming commands and TUI sessions.
 clink.Listen(ctx, conf, handler)
@@ -122,7 +124,10 @@ func runLocally(ctx context.Context, _ []string) error {
     defer cleanup()
 
     handler := func(hctx context.Context, s clink.Session, args []string) error {
-        cmd := app.Root() // *cli.Command with wire-injected subcommands
+        // Build a fresh command tree per session: handlers run concurrently and
+        // a shared *cli.Command carries per-run state (I/O writers, parsed
+        // flags) that two sessions would race on.
+        cmd := app.NewRoot() // *cli.Command with wire-injected subcommands
         // urfave/cli v3 inherits Reader/Writer/ErrWriter from parent, so only
         // the root needs wiring.
         cmd.Reader, cmd.Writer, cmd.ErrWriter = s, s, s.Stderr()
@@ -138,3 +143,51 @@ func runLocally(ctx context.Context, _ []string) error {
 
 The client binary never touches wire, DB, or any server-only service. Only
 `runLocally` does. Same binary on both sides.
+
+## Concurrency
+
+`Handler` runs on its own goroutine per session, and clink serializes nothing:
+several clients — or several sessions from one client — can be inside `Handler`
+simultaneously. `Handler` and everything it closes over (CLI command tree,
+wire-built services, caches, loggers) must be safe for concurrent use.
+
+CLI frameworks are usually *not*. A single `*cli.Command` (urfave) or
+`*cobra.Command` holds per-run state — the I/O writers you assign and the parsed
+flag values — so reusing one instance across sessions races and can leak one
+client's output into another's. Build or clone the command tree inside `Handler`,
+as the example above does.
+
+A single `Session` is per-connection and not safe for concurrent use by multiple
+goroutines within one `Handler` call.
+
+## Security model
+
+clink assumes daemon and clients share one trust domain, typically a
+loopback-bound daemon serving processes of the same user:
+
+- **Empty `Password` means no authentication.** `Listen` then accepts *any*
+  public key, and `Connect` authenticates with a throwaway in-memory key. Any
+  local user or process able to reach the port gets a session — and thus
+  arbitrary command execution plus file read/write on connecting clients'
+  behalf. `Listen` refuses to start in this mode on a non-loopback host, but on
+  a multi-user machine loopback is not a boundary: set `Password`.
+- **No rate limiting, no connection or session cap.** Password auth compares a
+  SHA-256 digest in constant time, but nothing throttles guesses or bounds the
+  number of open connections. Don't expose the port; front it with a real
+  gateway if you must.
+- **Host key pinning is opt-in.** Without `HostKeyPEM` the daemon's key is
+  ephemeral per start, so clients cannot pin it across restarts. For any
+  non-loopback `Host`, `Connect` requires `HostPublicKey`.
+- **File forwarding is allowlisted, not sandboxed.** The client only serves
+  paths that appeared verbatim in the args it passed to `Connect`, so the daemon
+  cannot read arbitrary client files — but it can read or overwrite anything the
+  user named on the command line.
+
+## Versioning
+
+There is no version or protocol negotiation between `Connect` and `Listen`. The
+wire contract — argv forwarding, the `file-request` channel payload, exit-code
+signalling — is assumed identical on both ends because **both ends are the same
+binary**. A client built against a different clink version than the running
+daemon may fail in unhelpful ways instead of reporting a mismatch. Restart the
+daemon after upgrading the binary.
