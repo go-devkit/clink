@@ -94,7 +94,7 @@ func WithSession(ctx context.Context, s Session) context.Context {
 }
 
 // Handler processes a CLI command received from a connected client.
-// args contains the parsed command arguments (without leading "--" separators);
+// args contains the command arguments as sent by the client;
 // args is empty for interactive (no-args) clients.
 // Return ErrNotHandled if the command is not recognized — the session closes.
 // Return *ExitError to set a custom remote exit code.
@@ -217,9 +217,6 @@ func handleCLI(parent context.Context, handler Handler) wish.Middleware {
 	return func(next ssh.Handler) ssh.Handler {
 		return func(s ssh.Session) {
 			args := s.Command()
-			if len(args) > 0 && args[0] == "--" {
-				args = args[1:]
-			}
 
 			ctx, cancel := context.WithCancel(parent)
 			defer cancel()
