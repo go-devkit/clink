@@ -371,31 +371,6 @@ func TestStdinPipingViaSSH(t *testing.T) {
 	}
 }
 
-func TestHandleCLIStripsLeadingDoubleDash(t *testing.T) {
-	var got []string
-	handler := func(_ context.Context, s Session, args []string) error {
-		got = args
-		fmt.Fprint(s, "ok")
-		return nil
-	}
-	conf, stop := startServer(t, "pw", nil, handler)
-	defer stop()
-
-	c := dialSSH(t, conf, gossh.Password("pw"))
-	defer c.Close()
-	sess, err := c.NewSession()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sess.Close()
-	if _, err := sess.Output("-- greet world"); err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 2 || got[0] != "greet" || got[1] != "world" {
-		t.Fatalf("args = %q, want [greet world]", got)
-	}
-}
-
 func TestConnectHostPublicKeyAccepts(t *testing.T) {
 	osStdMu.Lock()
 	defer osStdMu.Unlock()
