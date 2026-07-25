@@ -326,35 +326,6 @@ func forwardSignals(session *ssh.Session) func() {
 	}
 }
 
-// forwardWinch relays client-side SIGWINCH to the remote PTY session so the
-// server-side TUI resizes, sending the current terminal size on each change.
-// The returned func stops forwarding.
-func forwardWinch(session *ssh.Session) func() {
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGWINCH)
-
-	done := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-ch:
-				width, height, err := term.GetSize(int(os.Stdout.Fd()))
-				if err != nil {
-					continue
-				}
-				_ = session.WindowChange(height, width)
-			case <-done:
-				return
-			}
-		}
-	}()
-
-	return func() {
-		signal.Stop(ch)
-		close(done)
-	}
-}
-
 // clientAuth returns the SSH auth methods for Connect.
 //
 // If a password is set, password auth is used. Otherwise an ephemeral ed25519
