@@ -15,6 +15,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/keygen"
+	"github.com/creack/pty"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -719,6 +720,141 @@ func TestSessionContextCancelsOnDisconnect(t *testing.T) {
 	}
 }
 
+func TestClientSignalCancelsHandlerCtx(t *testing.T) {
+	for _, sig := range []gossh.Signal{gossh.SIGINT, gossh.SIGTERM} {
+		t.Run(string(sig), func(t *testing.T) {
+			started := make(chan struct{})
+			cancelled := make(chan struct{})
+			handler := func(ctx context.Context, _ Session, _ []string) error {
+				close(started)
+				<-ctx.Done()
+				close(cancelled)
+				return ctx.Err()
+			}
+			conf, stop := startServer(t, "pw", nil, handler)
+			defer stop()
+
+			c := dialSSH(t, conf, gossh.Password("pw"))
+			defer c.Close()
+			sess, err := c.NewSession()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sess.Close()
+			if err := sess.Start("long-running"); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-started:
+			case <-time.After(3 * time.Second):
+				t.Fatal("handler never started")
+			}
+			if err := sess.Signal(sig); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-cancelled:
+			case <-time.After(3 * time.Second):
+				t.Fatalf("handler ctx not cancelled after %s", sig)
+			}
+		})
+	}
+}
+
+// resizeTUI signals ready on its first WindowSizeMsg (proving the program has
+// started and the session's Pty was already read), then records the dimensions
+// of a WindowSizeMsg whose width matches target and quits. Used to assert
+// client window-change forwarding reaches the server-side TUI.
+type resizeTUI struct {
+	ready  chan struct{}
+	got    chan [2]int
+	target int
+}
+
+func (m resizeTUI) Init() tea.Cmd { return nil }
+func (m resizeTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if ws, ok := msg.(tea.WindowSizeMsg); ok {
+		select {
+		case m.ready <- struct{}{}:
+		default:
+		}
+		if ws.Width == m.target {
+			select {
+			case m.got <- [2]int{ws.Width, ws.Height}:
+			default:
+			}
+			return m, tea.Quit
+		}
+	}
+	return m, nil
+}
+func (m resizeTUI) View() tea.View { return tea.NewView("") }
+
+func TestClientWindowChangeResizesTUI(t *testing.T) {
+	ready := make(chan struct{}, 1)
+	got := make(chan [2]int, 1)
+	handler := func(_ context.Context, _ Session, args []string) error {
+		if len(args) != 0 {
+			return ErrNotHandled
+		}
+		return &Interactive{Model: resizeTUI{ready: ready, got: got, target: 120}}
+	}
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	c := dialSSH(t, conf, gossh.Password("pw"))
+	defer c.Close()
+	sess, err := c.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	if err := sess.RequestPty("xterm-256color", 24, 80, gossh.TerminalModes{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Shell(); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- sess.Wait() }()
+
+	// Wait until the TUI has started (first WindowSizeMsg processed) before
+	// resizing, so the window-change doesn't race the library's startup Pty read.
+	select {
+	case <-ready:
+	case <-time.After(3 * time.Second):
+		t.Fatal("TUI never started")
+	}
+
+	// Resend the resize on a tick: the server's winch channel can drop a
+	// buffered change if the reader hasn't caught up.
+	if err := sess.WindowChange(40, 120); err != nil {
+		t.Fatal(err)
+	}
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case dims := <-got:
+			if dims[0] != 120 || dims[1] != 40 {
+				t.Fatalf("resize dims = %v, want [120 40]", dims)
+			}
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("session did not close after TUI quit")
+			}
+			return
+		case <-tick.C:
+			_ = sess.WindowChange(40, 120)
+		case <-deadline:
+			t.Fatal("TUI never received resize")
+		}
+	}
+}
+
 // TestShellRequestRoutesToHandlerWithEmptyArgs verifies the unified design:
 // a PTY+shell session reaches Handler with args=[]string{}, and a nil return
 // closes the session cleanly.
@@ -1253,6 +1389,96 @@ func TestAutoPTYWithPipedStdin(t *testing.T) {
 	AutoPTY()(&co)
 	if co.pty {
 		t.Fatal("AutoPTY set pty when stdin is not a terminal")
+	}
+}
+
+func TestAutoPTYWithTTYStdin(t *testing.T) {
+	osStdMu.Lock()
+	defer osStdMu.Unlock()
+
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+
+	orig := os.Stdin
+	os.Stdin = tty
+	defer func() { os.Stdin = orig }()
+
+	var co connectOpts
+	AutoPTY()(&co)
+	if !co.pty {
+		t.Fatal("AutoPTY did not set pty when stdin is a terminal")
+	}
+}
+
+func TestDaemonReachable(t *testing.T) {
+	if daemonReachable(Config{Host: "127.0.0.1", Port: freePort(t)}) {
+		t.Error("daemonReachable true with nothing listening")
+	}
+
+	handler := func(_ context.Context, _ Session, _ []string) error { return nil }
+	up, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+	if !daemonReachable(up) {
+		t.Error("daemonReachable false with daemon up")
+	}
+
+	// Host carrying a port fails normalizeHost, which must read as unreachable.
+	if daemonReachable(Config{Host: "127.0.0.1:80", Port: 80}) {
+		t.Error("daemonReachable true for host with embedded port")
+	}
+}
+
+// TestConnectWithPTYRunsInteractive drives the public Connect + WithPTY path
+// against a real tty (creack/pty), covering setupClientPTY (term.MakeRaw +
+// RequestPty) end-to-end into a server-side Interactive TUI.
+func TestConnectWithPTYRunsInteractive(t *testing.T) {
+	osStdMu.Lock()
+	defer osStdMu.Unlock()
+
+	ran := make(chan struct{})
+	handler := func(_ context.Context, _ Session, args []string) error {
+		if len(args) == 0 || args[0] != "dashboard" {
+			return ErrNotHandled
+		}
+		return &Interactive{Model: recordingTUI{ran: ran}}
+	}
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+	// Drain the master so server-side TUI writes never block on a full buffer.
+	go func() { _, _ = io.Copy(io.Discard, ptmx) }()
+
+	origIn, origOut, origErr := os.Stdin, os.Stdout, os.Stderr
+	os.Stdin, os.Stdout, os.Stderr = tty, tty, tty
+	defer func() { os.Stdin, os.Stdout, os.Stderr = origIn, origOut, origErr }()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Connect(context.Background(), conf, []string{"dashboard"}, WithPTY())
+	}()
+
+	select {
+	case <-ran:
+	case <-time.After(5 * time.Second):
+		t.Fatal("interactive TUI never ran via Connect+WithPTY")
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Connect: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Connect did not return after TUI quit")
 	}
 }
 
