@@ -11,6 +11,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/wish/v2"
@@ -54,6 +55,12 @@ type Config struct {
 	// Required when Host is not a literal loopback IP; empty disables
 	// verification (loopback only).
 	HostPublicKey []byte
+
+	// ShutdownGrace (server) bounds how long Listen waits for in-flight handlers
+	// to finish after its context is cancelled before force-closing the listener.
+	// Cancelling the context already cancels each handler's ctx, so this only
+	// bounds handlers that ignore cancellation. Zero uses a 5s default.
+	ShutdownGrace time.Duration
 }
 
 // Session provides I/O for command handlers.
@@ -88,6 +95,10 @@ type fileRequest struct {
 }
 
 const fileRequestChannel = "file-request"
+
+// defaultShutdownGrace is the shutdown grace period used when Config.ShutdownGrace
+// is zero.
+const defaultShutdownGrace = 5 * time.Second
 
 // fileStatusRequest is the channel-request name the producing side sends once,
 // after the last byte, to report whether the transfer completed. It turns a
@@ -247,6 +258,11 @@ func (*Interactive) Error() string {
 // binary. A client built against a different clink version than the running
 // daemon may fail in unhelpful ways rather than reporting a version mismatch.
 // After upgrading the binary, restart the daemon.
+//
+// When ctx is cancelled, Listen stops accepting connections and cancels every
+// in-flight handler's context, then waits up to a short grace period for them
+// to return before force-closing. A handler that ignores its context is cut off
+// at the deadline rather than blocking shutdown.
 func Listen(ctx context.Context, conf Config, handler Handler) error {
 	hostKeyPEM := conf.HostKeyPEM
 	if len(hostKeyPEM) == 0 {
@@ -304,7 +320,23 @@ func Listen(ctx context.Context, conf Config, handler Handler) error {
 		return err
 
 	case <-ctx.Done():
-		shutdownErr := s.Shutdown(context.Background())
+		// Cancelling ctx already cancelled every per-session handler ctx (they
+		// derive from it), so well-behaved handlers are unwinding. Give them a
+		// grace period to finish, then force the listener closed so a handler
+		// that ignores its ctx can't block shutdown forever.
+		grace := conf.ShutdownGrace
+		if grace <= 0 {
+			grace = defaultShutdownGrace
+		}
+
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), grace)
+		defer cancel()
+
+		shutdownErr := s.Shutdown(shutdownCtx)
+		if errors.Is(shutdownErr, context.DeadlineExceeded) {
+			shutdownErr = s.Close()
+		}
+
 		if err := <-errCh; err != nil && !errors.Is(err, ssh.ErrServerClosed) {
 			return err
 		}
