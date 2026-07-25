@@ -33,7 +33,9 @@ type Session interface {
     // filesystem. The client enforces an exact-string allowlist derived from
     // the args it passed to Connect — only paths matching one of those argv
     // strings (or the RHS of any "-"-prefixed "key=value" arg, e.g.
-    // "--file=/tmp/x" or "-f=/tmp/x") are served.
+    // "--file=/tmp/x" or "-f=/tmp/x") are served. Transfers are confirmed
+    // end-to-end: a truncated read or a failed write surfaces as an error
+    // (from Close, for the streaming forms) rather than silent partial data.
     ReadFile(path string) ([]byte, error)
     OpenFile(path string) (io.ReadCloser, error)
     WriteFile(path string, data []byte) error
@@ -44,7 +46,7 @@ type Handler func(ctx context.Context, s Session, args []string) error
 
 // Handler is the single dispatch point. args is empty for interactive
 // (no-args) clients — return *Interactive there to launch the main TUI.
-// Return ErrNotHandled if the command is unknown; the session closes.
+// Return ErrNotHandled if the command is unknown; the session exits 127.
 // Return *ExitError to set a custom remote exit code:
 //   return &clink.ExitError{Code: 2, Err: err}
 // Return *Interactive to launch a Bubble Tea TUI for this command:

@@ -456,7 +456,8 @@ func serveFileRead(newCh ssh.NewChannel, path string) {
 
 	go ssh.DiscardRequests(reqs)
 
-	_, _ = io.Copy(ch, f)
+	_, copyErr := io.Copy(ch, f)
+	sendFileStatus(ch, copyErr)
 }
 
 func serveFileWrite(newCh ssh.NewChannel, path string) {
@@ -475,6 +476,18 @@ func serveFileWrite(newCh ssh.NewChannel, path string) {
 
 	go ssh.DiscardRequests(reqs)
 
-	_, _ = io.Copy(f, ch)
-	_ = f.Close()
+	_, copyErr := io.Copy(f, ch)
+	closeErr := f.Close()
+	if copyErr == nil {
+		copyErr = closeErr
+	}
+	sendFileStatus(ch, copyErr)
+}
+
+// sendFileStatus reports the outcome of a file transfer back to the server over
+// the file channel, so a truncated or failed transfer surfaces there as an
+// error instead of a silent EOF. Best-effort: if the channel is already gone
+// the server sees the same missing-status error either way.
+func sendFileStatus(ch ssh.Channel, transferErr error) {
+	_, _ = ch.SendRequest(fileStatusRequest, false, encodeFileStatus(transferErr))
 }
