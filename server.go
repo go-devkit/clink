@@ -64,6 +64,12 @@ type Config struct {
 // (or the RHS of any "-"-prefixed "key=value" arg, e.g. "--file=/tmp/x" or
 // "-f=/tmp/x") are served. Anything else is rejected with "path not in
 // allowlist".
+//
+// Each transfer is confirmed end-to-end: the client reports whether it read or
+// wrote every byte. ReadFile and WriteFile return that status directly. For the
+// streaming forms, the status is reported by Close — always check the error
+// from the io.ReadCloser / io.WriteCloser's Close, as a truncated transfer
+// surfaces there rather than as a short read or a silent success.
 type Session interface {
 	io.Reader
 	io.Writer
@@ -82,6 +88,68 @@ type fileRequest struct {
 }
 
 const fileRequestChannel = "file-request"
+
+// fileStatusRequest is the channel-request name the producing side sends once,
+// after the last byte, to report whether the transfer completed. It turns a
+// silent truncation (a channel that just closes) into a surfaced error.
+const fileStatusRequest = "clink-file-status"
+
+// fileStatus is the fileStatusRequest payload. Empty Err means success.
+type fileStatus struct {
+	Err string
+}
+
+// encodeFileStatus renders a transfer error (nil for success) as a
+// fileStatusRequest payload.
+func encodeFileStatus(err error) []byte {
+	var s fileStatus
+	if err != nil {
+		s.Err = err.Error()
+	}
+
+	return gossh.Marshal(s)
+}
+
+// decodeFileStatus parses a fileStatusRequest payload into a transfer error,
+// or nil on success.
+func decodeFileStatus(payload []byte) error {
+	var s fileStatus
+	if err := gossh.Unmarshal(payload, &s); err != nil {
+		return fmt.Errorf("clink: malformed file transfer status: %w", err)
+	}
+	if s.Err != "" {
+		return errors.New(s.Err)
+	}
+
+	return nil
+}
+
+// awaitFileStatus drains a file channel's requests, delivering the first
+// fileStatusRequest as a transfer error (nil on success) to the returned
+// channel. If the channel closes before a status arrives — an aborted transfer
+// — it reports that as an error rather than a silent success. Draining also
+// keeps the request from blocking the channel's mux.
+func awaitFileStatus(reqs <-chan *gossh.Request) <-chan error {
+	out := make(chan error, 1)
+
+	go func() {
+		var done bool
+		for req := range reqs {
+			if req.Type == fileStatusRequest && !done {
+				out <- decodeFileStatus(req.Payload)
+				done = true
+			}
+			if req.WantReply {
+				_ = req.Reply(false, nil)
+			}
+		}
+		if !done {
+			out <- errors.New("clink: file transfer channel closed before completion status")
+		}
+	}()
+
+	return out
+}
 
 type sessionCtxKey struct{}
 
@@ -103,7 +171,7 @@ func WithSession(ctx context.Context, s Session) context.Context {
 // Handler processes a CLI command received from a connected client.
 // args contains the command arguments as sent by the client;
 // args is empty for interactive (no-args) clients.
-// Return ErrNotHandled if the command is not recognized — the session closes.
+// Return ErrNotHandled if the command is not recognized — the session exits 127.
 // Return *ExitError to set a custom remote exit code.
 // Return *Interactive to launch a Bubble Tea TUI for this command.
 //
@@ -126,8 +194,15 @@ func WithSession(ctx context.Context, s Session) context.Context {
 // goroutines within one Handler call.
 type Handler func(ctx context.Context, s Session, args []string) error
 
-// ErrNotHandled is returned by a Handler to indicate the command was not recognized.
+// ErrNotHandled is returned by a Handler to indicate the command was not
+// recognized. The session then exits with code 127 (the shell "command not
+// found" convention), so a client can distinguish an unhandled command from one
+// that ran and succeeded.
 var ErrNotHandled = errors.New("command not handled")
+
+// exitNotHandled is the remote exit code for an ErrNotHandled command, matching
+// the shell convention for "command not found".
+const exitNotHandled = 127
 
 // ExitError lets a Handler set a custom remote exit code. Wrap or return
 // directly; if Err is non-nil it is written to the session's stderr.
@@ -276,6 +351,7 @@ func handleCLI(parent context.Context, handler Handler) wish.Middleware {
 				return
 			}
 			if errors.Is(err, ErrNotHandled) {
+				_ = s.Exit(exitNotHandled)
 				return
 			}
 
@@ -324,29 +400,27 @@ func (w *sessionWrapper) Stderr() io.Writer {
 	return w.s.Stderr()
 }
 
-func (w *sessionWrapper) openFileChannel(path, mode string) (gossh.Channel, error) {
+func (w *sessionWrapper) openFileChannel(path, mode string) (gossh.Channel, <-chan error, error) {
 	if w.conn == nil {
-		return nil, errors.New("clink: no client connection available for file transfer")
+		return nil, nil, errors.New("clink: no client connection available for file transfer")
 	}
 
 	payload, err := json.Marshal(fileRequest{Path: path, Mode: mode})
 	if err != nil {
-		return nil, fmt.Errorf("marshal file request: %w", err)
+		return nil, nil, fmt.Errorf("marshal file request: %w", err)
 	}
 
 	ch, reqs, err := w.conn.OpenChannel(fileRequestChannel, payload)
 	if err != nil {
 		var openErr *gossh.OpenChannelError
 		if errors.As(err, &openErr) {
-			return nil, fmt.Errorf("client refused file %s %q: %s", mode, path, openErr.Message)
+			return nil, nil, fmt.Errorf("client refused file %s %q: %s", mode, path, openErr.Message)
 		}
 
-		return nil, fmt.Errorf("open file channel for %s %q: %w", mode, path, err)
+		return nil, nil, fmt.Errorf("open file channel for %s %q: %w", mode, path, err)
 	}
 
-	go gossh.DiscardRequests(reqs)
-
-	return ch, nil
+	return ch, awaitFileStatus(reqs), nil
 }
 
 func (w *sessionWrapper) ReadFile(path string) ([]byte, error) {
@@ -354,18 +428,46 @@ func (w *sessionWrapper) ReadFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
 
-	return io.ReadAll(rc)
+	data, readErr := io.ReadAll(rc)
+	closeErr := rc.Close()
+	if readErr != nil {
+		return data, readErr
+	}
+
+	// closeErr carries the client's transfer status: a truncated read surfaces
+	// here rather than returning partial data as success.
+	return data, closeErr
 }
 
 func (w *sessionWrapper) OpenFile(path string) (io.ReadCloser, error) {
-	ch, err := w.openFileChannel(path, "read")
+	ch, status, err := w.openFileChannel(path, "read")
 	if err != nil {
 		return nil, err
 	}
 
-	return ch, nil
+	return &readChannel{ch: ch, status: status}, nil
+}
+
+// readChannel wraps a file-read channel so Close reports the client's transfer
+// status: a read that was truncated on the client surfaces as an error rather
+// than passing partial data off as a complete file.
+type readChannel struct {
+	ch     gossh.Channel
+	status <-chan error
+}
+
+func (r *readChannel) Read(p []byte) (int, error) {
+	return r.ch.Read(p)
+}
+
+func (r *readChannel) Close() error {
+	// Closing our end first aborts an incomplete transfer; on a completed read
+	// it is a benign "peer already closed". Either way the status channel — nil
+	// on success, an error on truncation/abort — is the authoritative result.
+	_ = r.ch.Close()
+
+	return <-r.status
 }
 
 func (w *sessionWrapper) WriteFile(path string, data []byte) error {
@@ -383,18 +485,21 @@ func (w *sessionWrapper) WriteFile(path string, data []byte) error {
 }
 
 func (w *sessionWrapper) CreateFile(path string) (io.WriteCloser, error) {
-	ch, err := w.openFileChannel(path, "write")
+	ch, status, err := w.openFileChannel(path, "write")
 	if err != nil {
 		return nil, err
 	}
 
-	return &writeChannel{ch: ch}, nil
+	return &writeChannel{ch: ch, status: status}, nil
 }
 
 // writeChannel wraps a gossh.Channel so Close sends EOF (signals end-of-write
-// to the client) before closing the full channel.
+// to the client), waits for the client's transfer status, then closes the full
+// channel. A write that failed on the client (e.g. disk full) surfaces from
+// Close instead of being silently reported as success.
 type writeChannel struct {
-	ch gossh.Channel
+	ch     gossh.Channel
+	status <-chan error
 }
 
 func (w *writeChannel) Write(p []byte) (int, error) {
@@ -402,8 +507,15 @@ func (w *writeChannel) Write(p []byte) (int, error) {
 }
 
 func (w *writeChannel) Close() error {
+	// CloseWrite signals EOF so the client flushes to disk and reports status;
+	// only then fully close. The status — nil on success, an error if the client
+	// failed to persist — is the authoritative result; a teardown-race error
+	// from the final Close is noise.
 	_ = w.ch.CloseWrite()
-	return w.ch.Close()
+	serr := <-w.status
+	_ = w.ch.Close()
+
+	return serr
 }
 
 // normalizeHost applies the shared Host handling for Listen and Connect:

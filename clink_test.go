@@ -1239,6 +1239,58 @@ func TestSessionFileAllowlistAllowsEqualsForm(t *testing.T) {
 	}
 }
 
+func TestSessionReadFileTransferError(t *testing.T) {
+	// A directory opens fine but errors when read as a file, forcing the
+	// client's copy to fail mid-transfer. ReadFile must surface that via the
+	// status frame rather than returning truncated data as success.
+	dir := t.TempDir()
+	gotErr := make(chan error, 1)
+	handler := func(_ context.Context, s Session, args []string) error {
+		_, err := s.ReadFile(args[0])
+		gotErr <- err
+		return nil
+	}
+
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	if err := Connect(context.Background(), conf, []string{dir}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	select {
+	case err := <-gotErr:
+		if err == nil {
+			t.Fatal("ReadFile on an unreadable source returned nil; truncation reported as success")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout")
+	}
+}
+
+func TestErrNotHandledExits127(t *testing.T) {
+	handler := func(_ context.Context, _ Session, _ []string) error {
+		return ErrNotHandled
+	}
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	c := dialSSH(t, conf, gossh.Password("pw"))
+	defer c.Close()
+	sess, err := c.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	err = sess.Run("bogus")
+	var exitErr *gossh.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected ExitError, got %v", err)
+	}
+	if exitErr.ExitStatus() != 127 {
+		t.Errorf("exit status = %d, want 127", exitErr.ExitStatus())
+	}
+}
+
 func TestSessionReadFileNotFound(t *testing.T) {
 	tmp := t.TempDir()
 	missing := tmp + "/missing.txt"
