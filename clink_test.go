@@ -457,6 +457,66 @@ func TestListenBadHostKeyPEM(t *testing.T) {
 	}
 }
 
+// TestListenShutdownForcesTimeout verifies a handler that ignores its context
+// cannot block Listen's shutdown forever: after the grace period the listener
+// is force-closed and Listen returns.
+func TestListenShutdownForcesTimeout(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	handler := func(_ context.Context, _ Session, _ []string) error {
+		close(started)
+		<-release // deliberately ignores the cancelled ctx
+
+		return nil
+	}
+
+	port := freePort(t)
+	conf := Config{Host: "127.0.0.1", Port: port, Password: "pw", ShutdownGrace: 100 * time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Listen(ctx, conf, handler) }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	var c *gossh.Client
+	for time.Now().Before(deadline) {
+		cfg := &gossh.ClientConfig{
+			User:            "user",
+			Auth:            []gossh.AuthMethod{gossh.Password("pw")},
+			HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+			Timeout:         100 * time.Millisecond,
+		}
+		var err error
+		c, err = gossh.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), cfg)
+		if err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if c == nil {
+		cancel()
+		t.Fatal("server did not become ready")
+	}
+	defer c.Close()
+
+	sess, err := c.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	go func() { _ = sess.Run("block") }()
+
+	<-started // handler is in-flight and ignoring ctx
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Listen did not shut down; handler blocked it past the grace period")
+	}
+}
+
 func TestConcurrentSessions(t *testing.T) {
 	var n int
 	var mu sync.Mutex

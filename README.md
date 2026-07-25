@@ -14,6 +14,8 @@ type Config struct {
 
     HostKeyPEM    []byte // server: optional persisted SSH host private key (PEM). Empty = ephemeral per Listen.
     HostPublicKey []byte // client: pinned host public key (authorized_keys format). Required for non-loopback Host; empty = no verification (loopback only, MITM risk on remote).
+
+    ShutdownGrace time.Duration // server: how long Listen waits for in-flight handlers after ctx cancel before force-closing. Zero = 5s.
 }
 ```
 
