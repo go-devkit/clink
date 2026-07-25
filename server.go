@@ -140,6 +140,8 @@ func awaitFileStatus(reqs <-chan *gossh.Request) <-chan error {
 				done = true
 			}
 			if req.WantReply {
+				// We only consume the status frame; reply failure means the
+				// channel is already closing, which the loop exit handles.
 				_ = req.Reply(false, nil)
 			}
 		}
@@ -351,6 +353,7 @@ func handleCLI(parent context.Context, handler Handler) wish.Middleware {
 				return
 			}
 			if errors.Is(err, ErrNotHandled) {
+				// Exit only errors if the session already ended; nothing to do then.
 				_ = s.Exit(exitNotHandled)
 				return
 			}
@@ -552,6 +555,7 @@ func isLoopback(host string) bool {
 func runInteractive(s ssh.Session, i *Interactive) {
 	if i == nil || i.Model == nil {
 		fmt.Fprintln(s.Stderr(), "clink: Handler returned a nil Interactive or Model")
+		// Message already sent; Exit only errors on an ended session, nothing to do.
 		_ = s.Exit(1)
 		return
 	}
@@ -559,6 +563,7 @@ func runInteractive(s ssh.Session, i *Interactive) {
 	pty, winch, ok := s.Pty()
 	if !ok {
 		fmt.Fprintln(s.Stderr(), "clink: interactive command requires a PTY (use clink.WithPTY)")
+		// Same: the diagnostic is out; a failed Exit means the session is already gone.
 		_ = s.Exit(1)
 		return
 	}
@@ -591,6 +596,7 @@ func runInteractive(s ssh.Session, i *Interactive) {
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(s.Stderr(), "clink: TUI exited with error: %v\n", err)
 		p.Kill()
+		// Error already reported; a failed Exit means the session already closed.
 		_ = s.Exit(1)
 		return
 	}
