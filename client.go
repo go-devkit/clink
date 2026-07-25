@@ -163,6 +163,7 @@ func Connect(ctx context.Context, conf Config, args []string, opts ...ConnectOpt
 	go func() {
 		select {
 		case <-ctx.Done():
+			// Unblocks NewClientConn below; the handshake error is what we report.
 			_ = tcpConn.Close()
 		case <-handshakeDone:
 		}
@@ -171,6 +172,7 @@ func Connect(ctx context.Context, conf Config, args []string, opts ...ConnectOpt
 	sshConn, chans, reqs, err := ssh.NewClientConn(tcpConn, addr, config)
 	close(handshakeDone)
 	if err != nil {
+		// Handshake failed; the conn is unusable and close errors add nothing.
 		_ = tcpConn.Close()
 		return fmt.Errorf("failed to connect: %w", err)
 	}
@@ -246,6 +248,7 @@ func interceptFileChannels(chans <-chan ssh.NewChannel, allow *allowlist) <-chan
 					handleFileRequest(nc, allow)
 				}(newCh)
 			default:
+				// At the concurrency cap; if the reject itself fails the peer is gone anyway.
 				_ = newCh.Reject(ssh.ResourceShortage, "too many concurrent file requests")
 			}
 		}
@@ -263,6 +266,7 @@ func setupClientPTY(session *ssh.Session) (func(), error) {
 	}
 
 	restore := func() {
+		// Best-effort teardown; if restore fails the terminal is already broken.
 		_ = term.Restore(int(os.Stdin.Fd()), oldState)
 	}
 
@@ -308,6 +312,8 @@ func forwardSignals(session *ssh.Session) func() {
 		for {
 			select {
 			case s := <-ch:
+				// Best-effort relay: if the send fails the remote ctx just
+				// won't cancel, and there is nothing the client can do about it.
 				switch s {
 				case os.Interrupt:
 					_ = session.Signal(ssh.SIGINT)
@@ -380,6 +386,7 @@ func daemonReachable(conf Config) bool {
 	if err != nil {
 		return false
 	}
+	// Only the successful dial matters; this is a liveness probe, not a session.
 	_ = c.Close()
 
 	return true
@@ -419,11 +426,13 @@ func (a *allowlist) allowed(path string) bool {
 func handleFileRequest(newCh ssh.NewChannel, allow *allowlist) {
 	var req fileRequest
 	if err := json.Unmarshal(newCh.ExtraData(), &req); err != nil {
+		// Rejecting is the whole response here; a failed reject means the peer left.
 		_ = newCh.Reject(ssh.UnknownChannelType, "invalid file request payload")
 		return
 	}
 
 	if !allow.allowed(req.Path) {
+		// Same: the reject is terminal, nothing to recover if it doesn't land.
 		_ = newCh.Reject(ssh.Prohibited, "path not in allowlist: "+req.Path)
 		return
 	}
@@ -436,6 +445,7 @@ func handleFileRequest(newCh ssh.NewChannel, allow *allowlist) {
 		serveFileWrite(newCh, req.Path)
 
 	default:
+		// Terminal reject for an unknown mode; failure here is unrecoverable.
 		_ = newCh.Reject(ssh.UnknownChannelType, "unknown file request mode: "+req.Mode)
 	}
 }
@@ -443,6 +453,7 @@ func handleFileRequest(newCh ssh.NewChannel, allow *allowlist) {
 func serveFileRead(newCh ssh.NewChannel, path string) {
 	f, err := os.Open(path)
 	if err != nil {
+		// Open failed; report it via reject, then nothing more to do.
 		_ = newCh.Reject(ssh.Prohibited, err.Error())
 		return
 	}
@@ -463,6 +474,7 @@ func serveFileRead(newCh ssh.NewChannel, path string) {
 func serveFileWrite(newCh ssh.NewChannel, path string) {
 	f, err := os.Create(path)
 	if err != nil {
+		// Create failed; report it via reject, then nothing more to do.
 		_ = newCh.Reject(ssh.Prohibited, err.Error())
 		return
 	}
@@ -489,5 +501,7 @@ func serveFileWrite(newCh ssh.NewChannel, path string) {
 // error instead of a silent EOF. Best-effort: if the channel is already gone
 // the server sees the same missing-status error either way.
 func sendFileStatus(ch ssh.Channel, transferErr error) {
+	// Fire-and-forget: a dropped send is indistinguishable from a broken channel,
+	// and the server treats a missing status frame as a transfer error either way.
 	_, _ = ch.SendRequest(fileStatusRequest, false, encodeFileStatus(transferErr))
 }

@@ -28,6 +28,8 @@ func forwardWinch(session *ssh.Session) func() {
 				if err != nil {
 					continue
 				}
+				// Cosmetic resize; a failed send leaves a stale size that the
+				// next SIGWINCH corrects, so nothing to handle.
 				_ = session.WindowChange(height, width)
 			case <-done:
 				return
