@@ -32,6 +32,13 @@ import (
 // (e.g. 127.0.0.1, ::1); hostnames are rejected to avoid DNS-dependent safety
 // checks. On shared hosts any local user or process that can reach the loopback
 // port can connect; set Password when running on multi-user machines.
+//
+// clink does no rate limiting and caps neither concurrent connections nor
+// concurrent sessions. Password auth compares a SHA-256 digest in constant
+// time, but an attacker that can reach the port may guess passwords as fast as
+// it can open connections. The intended deployment is a loopback-bound daemon
+// serving the same trust domain as its clients; put a real gateway in front of
+// it before exposing the port.
 type Config struct {
 	Host     string
 	Port     int
@@ -105,6 +112,18 @@ func WithSession(ctx context.Context, s Session) context.Context {
 // Work that must outlive the request — e.g. a background task the client only
 // kicks off — must not use ctx; spawn it with the daemon's own root context
 // instead.
+//
+// Handler runs on its own goroutine per session and clink serializes nothing:
+// several clients (or several sessions from one client) can be inside Handler
+// at the same time. Handler and everything it closes over — the CLI command
+// tree, wire-built services, caches — must be safe for concurrent use. Note
+// that CLI frameworks generally are not: mutating a shared *cli.Command (its
+// Reader/Writer/ErrWriter, or urfave's parsed flag state) from two sessions
+// races. Build or clone the command tree inside Handler rather than reusing one
+// instance across sessions.
+//
+// Session itself is per-connection and not safe for concurrent use by multiple
+// goroutines within one Handler call.
 type Handler func(ctx context.Context, s Session, args []string) error
 
 // ErrNotHandled is returned by a Handler to indicate the command was not recognized.
@@ -144,6 +163,13 @@ func (*Interactive) Error() string {
 // Listen starts the daemon and handles incoming CLI commands and TUI sessions.
 // Handler receives empty args for interactive (no-args) clients and can return
 // *Interactive to launch a TUI for them — same mechanism as subcommand TUIs.
+//
+// There is no version or protocol negotiation between Connect and Listen: the
+// wire contract (argv forwarding, the "file-request" channel payload, exit-code
+// signalling) is assumed identical on both ends because both ends are the same
+// binary. A client built against a different clink version than the running
+// daemon may fail in unhelpful ways rather than reporting a version mismatch.
+// After upgrading the binary, restart the daemon.
 func Listen(ctx context.Context, conf Config, handler Handler) error {
 	hostKeyPEM := conf.HostKeyPEM
 	if len(hostKeyPEM) == 0 {
