@@ -382,6 +382,9 @@ func handleCLI(parent context.Context, handler Handler) wish.Middleware {
 			conn, _ := s.Context().Value(ssh.ContextKeyConn).(*gossh.ServerConn)
 			err := handler(ctx, &sessionWrapper{s: s, conn: conn}, args)
 			if err == nil {
+				// Send an explicit exit status; without it non-PTY clients see
+				// crypto/ssh's *ExitMissingError instead of a clean success.
+				_ = s.Exit(0)
 				return
 			}
 			if errors.Is(err, ErrNotHandled) {

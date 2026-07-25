@@ -3,6 +3,7 @@ package clink
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,6 +18,25 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
+
+// ExitCode reports the remote command's exit status from an error returned by
+// Connect. ok is true when err represents a completed remote command that
+// exited non-zero (the daemon already streamed its output to this process, so
+// callers should exit with the returned code without printing err). For a nil
+// error the code is 0; for connection/transport errors ok is false and the
+// caller should report err itself.
+func ExitCode(err error) (code int, ok bool) {
+	if err == nil {
+		return 0, true
+	}
+
+	var exitErr *ssh.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitStatus(), true
+	}
+
+	return 0, false
+}
 
 // fileRequestConcurrency caps how many client-side file transfers can run at
 // once per Connect. Excess requests are rejected with ResourceShortage rather
