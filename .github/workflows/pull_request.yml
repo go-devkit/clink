@@ -122,14 +122,10 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.txt
 
-  test-adapters:
-    name: Test Adapters
+  test-urfave:
+    name: Test urfave
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    strategy:
-      fail-fast: false
-      matrix:
-        module: [ urfave, cobra ]
     steps:
 
       - name: Checkout
@@ -145,16 +141,16 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/go/pkg/mod
-          key: go-modules-adapters-v1
+          key: go-modules-urfave-v1
 
       - name: Cache Go Build
         uses: actions/cache@v6
         with:
           path: ~/.cache/go-build
-          key: go-build-adapters-v1
+          key: go-build-urfave-v1
 
       - name: Test
-        working-directory: ${{ matrix.module }}
+        working-directory: urfave
         run: |
           go test \
           -trimpath -buildvcs=false \

@@ -23,7 +23,7 @@ func main() {
 
 	err := clink.Connect(ctx, conf, os.Args[1:],
 		clink.AutoPTY(),
-		clink.WithLocalCommand(clink.LocalFunc("serve", runServer)),
+		clink.WithLocalCommand("serve", runServer),
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

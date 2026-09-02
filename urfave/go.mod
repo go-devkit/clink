@@ -37,7 +37,3 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
 )
-
-// clink.LocalCommand and WithLocalCommandTree are not in v0.1.0 yet; drop this
-// once the core module is tagged with them.
-replace github.com/go-devkit/clink => ../

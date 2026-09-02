@@ -64,44 +64,25 @@ clink.Listen(ctx, conf, handler)
 // Client side. Connect forwards args to the daemon.
 // AutoPTY allocates a PTY iff os.Stdin is a terminal (mirrors ssh's default),
 // so the same call handles TUI subcommands and pipe-friendly plain commands.
-// A local command registers itself: it carries the name clink routes on, so
-// nothing is repeated. LocalCommand is two methods and stays framework-free;
-// the adapters live in their own modules.
-type LocalCommand interface {
-    Name() string                                  // routing key, compared to args[0]
-    Run(ctx context.Context, args []string) error  // args verbatim, args[0] included
-}
-
-// LocalFunc adapts a plain function, for local commands that are not a command
-// tree — chiefly the no-args entry, which has no argv to parse.
-func LocalFunc(name string, fn func(ctx context.Context, args []string) error) LocalCommand
-
-// WithLocalCommand registers a command that must run locally instead of being
+// WithLocalCommand names a subcommand that must run locally instead of being
 // forwarded (typically the one that starts the daemon). Connect refuses to
 // invoke a local command when a daemon is already reachable, preventing a
 // double-run.
-// WithLocalFallback registers a command that runs locally ONLY when no daemon is
-// reachable; if the daemon is up, Connect forwards as usual. Name "" matches the
-// no-args invocation — handy for an entry that opens the dashboard when the
-// daemon runs and starts the daemon otherwise.
+// WithLocalFallback names a command that runs locally ONLY when no daemon is
+// reachable; if the daemon is up, Connect forwards as usual. Use name "" to
+// match the no-args invocation — handy for an entry that opens the dashboard
+// when the daemon runs and starts the daemon otherwise.
 clink.Connect(ctx, conf, args,
     clink.AutoPTY(),
-    clink.WithLocalCommand(urfave.Tree(runCommand())),
-    clink.WithLocalFallback(clink.LocalFunc("", startDaemon)),
+    clink.WithLocalCommand("run", runLocally),
+    clink.WithLocalFallback("", runLocally),
 )
+
+// Reachable is the liveness probe both options use — a 200ms TCP dial, no
+// handshake, no auth. Exported for consumers that would rather dispatch local
+// commands with a plain if/else (see "Dispatching it yourself").
+clink.Reachable(conf)
 ```
-
-Adapters (separate modules — plain clink pulls in neither framework):
-
-```bash
-go get github.com/go-devkit/clink/urfave  # Tree(*cli.Command), plus Serve/Handler (below)
-go get github.com/go-devkit/clink/cobra   # Tree(*cobra.Command)
-```
-
-The command is built before `Connect` decides whether it is selected — `Name()`
-can't be read otherwise — so its constructor must stay cheap. Assemble the
-command tree there, and keep DB handles, secrets, and other server-only wiring
-inside the action, which only runs when the command actually matches.
 
 ## Usage
 
@@ -119,7 +100,6 @@ import (
     "syscall"
 
     "github.com/go-devkit/clink"
-    "github.com/go-devkit/clink/urfave"
     "github.com/urfave/cli/v3"
 )
 
@@ -131,32 +111,20 @@ func main() {
 
     err := clink.Connect(ctx, conf, os.Args[1:],
         clink.AutoPTY(),
-        // The tree carries its own name ("run"), so nothing is repeated and
-        // `myapp run --help` reaches the command's help.
-        clink.WithLocalCommand(urfave.Tree(runCommand())),
+        clink.WithLocalCommand("run", runLocally),
         // Optional: `myapp` (no subcommand) starts the daemon if none is up,
-        // else forwards and opens the main TUI. The no-args key gets no argv to
-        // parse, so it takes the LocalFunc form.
-        clink.WithLocalFallback(clink.LocalFunc("", func(fctx context.Context, _ []string) error {
-            return serve(fctx)
-        })),
+        // else forwards and opens the main TUI.
+        clink.WithLocalFallback("", runLocally),
     )
     if err != nil {
         os.Exit(1)
     }
 }
 
-// runCommand is the local command tree. Building it is a struct literal —
-// wire/DI runs inside the action, only when `run` is actually selected.
-func runCommand() *cli.Command {
-    return &cli.Command{
-        Name:   "run",
-        Usage:  "start the daemon",
-        Action: func(ctx context.Context, _ *cli.Command) error { return serve(ctx) },
-    }
-}
-
-func serve(ctx context.Context) error {
+// runLocally is invoked instead of Connect when args[0] == "run".
+// This is where wire/DI builds the full application and hands the CLI
+// tree to clink.Listen.
+func runLocally(ctx context.Context, _ []string) error {
     // e.g. wire.BuildApp() — full DI happens ONLY here, on the server env.
     app, cleanup, err := buildApp(ctx)
     if err != nil {
@@ -183,7 +151,7 @@ func serve(ctx context.Context) error {
 - `myapp` (no subcommand) — opens the daemon's shell-mode session; Handler receives empty args and can return `*Interactive` for the main TUI.
 
 The client binary never touches wire, DB, or any server-only service. Only
-`serve` does. Same binary on both sides.
+`runLocally` does. Same binary on both sides.
 
 ## urfave/cli adapter
 
@@ -203,9 +171,35 @@ return urfave.Serve(ctx, conf, func(s clink.Session) *cli.Command {
 satisfied. `Handler` is exported for applications that need to wrap it — routing
 empty args to a main TUI, say.
 
-The same module's `Tree` covers the client side of the split: it turns the local
-`run` command into a [`clink.LocalCommand`](#core-api), so the daemon-starting
-command names itself once.
+## Dispatching it yourself
+
+`WithLocalCommand` is convenience, not a requirement: it is a name match plus the
+`Reachable` probe. An `if` does the same job, and keeps dispatch where you can
+read it:
+
+```go
+func main() {
+    ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+    defer stop()
+
+    var err error
+    switch {
+    case len(os.Args) > 1 && os.Args[1] == "run":
+        if clink.Reachable(conf) {
+            err = errors.New("daemon already running")
+            break
+        }
+        err = urfave.Serve(ctx, conf, newRoot) // never dials; this process IS the daemon
+    default:
+        err = clink.Connect(ctx, conf, os.Args[1:], clink.AutoPTY())
+    }
+    // ... ExitCode(err) handling
+}
+```
+
+Everything not named `run` forwards — no per-subcommand registration either way.
+Use the options when you want the ready-made refusal message and the
+forward-if-up / run-if-down fallback; use the `if` when you want the control.
 
 ## Concurrency
 
