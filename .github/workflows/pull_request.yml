@@ -45,6 +45,13 @@ jobs:
           working-directory: .
           args: --path-prefix=. --timeout 5m
 
+      - name: Lint urfave
+        uses: golangci/golangci-lint-action@v9
+        with:
+          install-mode: "none"
+          working-directory: urfave
+          args: --path-prefix=urfave --timeout 5m
+
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -114,6 +121,40 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.txt
+
+  test-urfave:
+    name: Test urfave
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Mise
+        uses: jdx/mise-action@v4
+        with:
+          install: true
+          cache: true
+
+      - name: Cache Go Modules
+        uses: actions/cache@v6
+        with:
+          path: ~/go/pkg/mod
+          key: go-modules-urfave-v1
+
+      - name: Cache Go Build
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-build-urfave-v1
+
+      - name: Test
+        working-directory: urfave
+        run: |
+          go test \
+          -trimpath -buildvcs=false \
+          -failfast -count=1 -race -v ./...
 
   test-internal:
     name: Test Internal
