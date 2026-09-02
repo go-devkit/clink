@@ -148,6 +148,24 @@ func runLocally(ctx context.Context, _ []string) error {
 The client binary never touches wire, DB, or any server-only service. Only
 `runLocally` does. Same binary on both sides.
 
+## urfave/cli adapter
+
+The handler above is the same in every urfave-based consumer, and the parts that
+are easy to get wrong — urfave's process-global `OsExiter` and `ErrWriter`,
+`argv[0]`, `cli.ExitCoder` → `clink.ExitError`, panic recovery — are not
+application-specific. `github.com/go-devkit/clink/urfave` (a nested module, so
+urfave/cli stays off clink's dependency list) does all of it:
+
+```go
+return urfave.Serve(ctx, conf, func(s clink.Session) *cli.Command {
+    return rootCommand(s, commands)
+})
+```
+
+`newRoot` runs per session, which is also what keeps the fresh-tree rule below
+satisfied. `Handler` is exported for applications that need to wrap it — routing
+empty args to a main TUI, say.
+
 ## Concurrency
 
 `Handler` runs on its own goroutine per session, and clink serializes nothing:
