@@ -130,7 +130,7 @@ func Connect(ctx context.Context, conf Config, args []string, opts ...ConnectOpt
 	}
 
 	if fn, ok := co.locals[key]; ok {
-		if daemonReachable(conf) {
+		if Reachable(conf) {
 			host, err := normalizeHost(conf.Host)
 			if err != nil {
 				host = conf.Host
@@ -142,7 +142,7 @@ func Connect(ctx context.Context, conf Config, args []string, opts ...ConnectOpt
 		return fn(ctx, args)
 	}
 
-	if fn, ok := co.fallbacks[key]; ok && !daemonReachable(conf) {
+	if fn, ok := co.fallbacks[key]; ok && !Reachable(conf) {
 		return fn(ctx, args)
 	}
 
@@ -392,10 +392,22 @@ func shellQuote(s string) string {
 	return "'" + quoted + "'"
 }
 
-// daemonReachable does a quick TCP dial to see whether something is already
-// listening on the configured host/port. Used to refuse local-command
-// dispatch when the daemon is already running.
-func daemonReachable(conf Config) bool {
+// Reachable reports whether something is listening on the configured host and
+// port. It is the probe [WithLocalCommand] and [WithLocalFallback] use, exported
+// for consumers that dispatch local commands themselves:
+//
+//	if len(os.Args) > 1 && os.Args[1] == "run" {
+//	    if clink.Reachable(conf) {
+//	        return errors.New("daemon already running")
+//	    }
+//	    return urfave.Serve(ctx, conf, newRoot)
+//	}
+//	return clink.Connect(ctx, conf, os.Args[1:], clink.AutoPTY())
+//
+// It dials with a 200ms timeout and closes immediately: no handshake, no
+// authentication. A true result means the port is taken, not that a clink daemon
+// with a matching Password answers there.
+func Reachable(conf Config) bool {
 	host, err := normalizeHost(conf.Host)
 	if err != nil {
 		return false

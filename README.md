@@ -77,6 +77,11 @@ clink.Connect(ctx, conf, args,
     clink.WithLocalCommand("run", runLocally),
     clink.WithLocalFallback("", runLocally),
 )
+
+// Reachable is the liveness probe both options use — a 200ms TCP dial, no
+// handshake, no auth. Exported for consumers that would rather dispatch local
+// commands with a plain if/else (see "Dispatching it yourself").
+clink.Reachable(conf)
 ```
 
 ## Usage
@@ -165,6 +170,36 @@ return urfave.Serve(ctx, conf, func(s clink.Session) *cli.Command {
 `newRoot` runs per session, which is also what keeps the fresh-tree rule below
 satisfied. `Handler` is exported for applications that need to wrap it — routing
 empty args to a main TUI, say.
+
+## Dispatching it yourself
+
+`WithLocalCommand` is convenience, not a requirement: it is a name match plus the
+`Reachable` probe. An `if` does the same job, and keeps dispatch where you can
+read it:
+
+```go
+func main() {
+    ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+    defer stop()
+
+    var err error
+    switch {
+    case len(os.Args) > 1 && os.Args[1] == "run":
+        if clink.Reachable(conf) {
+            err = errors.New("daemon already running")
+            break
+        }
+        err = urfave.Serve(ctx, conf, newRoot) // never dials; this process IS the daemon
+    default:
+        err = clink.Connect(ctx, conf, os.Args[1:], clink.AutoPTY())
+    }
+    // ... ExitCode(err) handling
+}
+```
+
+Everything not named `run` forwards — no per-subcommand registration either way.
+Use the options when you want the ready-made refusal message and the
+forward-if-up / run-if-down fallback; use the `if` when you want the control.
 
 ## Concurrency
 

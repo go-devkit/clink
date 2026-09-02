@@ -1501,21 +1501,21 @@ func TestAutoPTYWithTTYStdin(t *testing.T) {
 	}
 }
 
-func TestDaemonReachable(t *testing.T) {
-	if daemonReachable(Config{Host: "127.0.0.1", Port: freePort(t)}) {
-		t.Error("daemonReachable true with nothing listening")
+func TestReachable(t *testing.T) {
+	if Reachable(Config{Host: "127.0.0.1", Port: freePort(t)}) {
+		t.Error("Reachable true with nothing listening")
 	}
 
 	handler := func(_ context.Context, _ Session, _ []string) error { return nil }
 	up, stop := startServer(t, "pw", nil, handler)
 	defer stop()
-	if !daemonReachable(up) {
-		t.Error("daemonReachable false with daemon up")
+	if !Reachable(up) {
+		t.Error("Reachable false with daemon up")
 	}
 
 	// Host carrying a port fails normalizeHost, which must read as unreachable.
-	if daemonReachable(Config{Host: "127.0.0.1:80", Port: 80}) {
-		t.Error("daemonReachable true for host with embedded port")
+	if Reachable(Config{Host: "127.0.0.1:80", Port: 80}) {
+		t.Error("Reachable true for host with embedded port")
 	}
 }
 
