@@ -3,7 +3,7 @@ module github.com/go-devkit/clink/cobra
 go 1.25.9
 
 require (
-	github.com/go-devkit/clink v0.0.0
+	github.com/go-devkit/clink v0.1.0
 	github.com/spf13/cobra v1.10.1
 )
 
@@ -40,4 +40,6 @@ require (
 	golang.org/x/term v0.42.0 // indirect
 )
 
+// clink.LocalCommand and WithLocalCommandTree are not in v0.1.0 yet; drop this
+// once the core module is tagged with them.
 replace github.com/go-devkit/clink => ../

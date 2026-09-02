@@ -45,6 +45,13 @@ jobs:
           working-directory: .
           args: --path-prefix=. --timeout 5m
 
+      - name: Lint urfave
+        uses: golangci/golangci-lint-action@v9
+        with:
+          install-mode: "none"
+          working-directory: urfave
+          args: --path-prefix=urfave --timeout 5m
+
   build:
     name: Build
     runs-on: ubuntu-latest

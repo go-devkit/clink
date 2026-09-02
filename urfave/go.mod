@@ -3,8 +3,9 @@ module github.com/go-devkit/clink/urfave
 go 1.25.9
 
 require (
-	github.com/go-devkit/clink v0.0.0
-	github.com/urfave/cli/v3 v3.9.0
+	github.com/go-devkit/clink v0.1.0
+	github.com/urfave/cli/v3 v3.11.0
+	golang.org/x/crypto v0.50.0
 )
 
 require (
@@ -31,11 +32,12 @@ require (
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	golang.org/x/crypto v0.50.0 // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
-	golang.org/x/term v0.42.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/term v0.45.0 // indirect
 )
 
+// clink.LocalCommand and WithLocalCommandTree are not in v0.1.0 yet; drop this
+// once the core module is tagged with them.
 replace github.com/go-devkit/clink => ../

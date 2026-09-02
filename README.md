@@ -88,15 +88,15 @@ type LocalCommand interface {
 
 clink.Connect(ctx, conf, args,
     clink.AutoPTY(),
-    clink.WithLocalCommandTree(clinkurfave.Tree(runCommand())),
-    clink.WithLocalFallbackTree(clinkcobra.Tree(rootCommand())),
+    clink.WithLocalCommandTree(urfave.Tree(runCommand())),
+    clink.WithLocalFallbackTree(cobra.Tree(rootCommand())),
 )
 ```
 
 Adapters (separate modules — plain clink pulls in neither framework):
 
 ```bash
-go get github.com/go-devkit/clink/urfave  # Tree(*cli.Command)
+go get github.com/go-devkit/clink/urfave  # Tree(*cli.Command), plus Serve/Handler (below)
 go get github.com/go-devkit/clink/cobra   # Tree(*cobra.Command)
 ```
 
@@ -121,7 +121,7 @@ import (
     "syscall"
 
     "github.com/go-devkit/clink"
-    clinkurfave "github.com/go-devkit/clink/urfave"
+    "github.com/go-devkit/clink/urfave"
     "github.com/urfave/cli/v3"
 )
 
@@ -135,7 +135,7 @@ func main() {
         clink.AutoPTY(),
         // The tree carries its own name ("run"), so nothing is repeated and
         // `myapp run --help` reaches the command's help.
-        clink.WithLocalCommandTree(clinkurfave.Tree(runCommand())),
+        clink.WithLocalCommandTree(urfave.Tree(runCommand())),
         // Optional: `myapp` (no subcommand) starts the daemon if none is up,
         // else forwards and opens the main TUI. The no-args key gets no argv to
         // parse, so it takes the plain func form.
@@ -185,7 +185,29 @@ func serve(ctx context.Context) error {
 - `myapp` (no subcommand) — opens the daemon's shell-mode session; Handler receives empty args and can return `*Interactive` for the main TUI.
 
 The client binary never touches wire, DB, or any server-only service. Only
-`runLocally` does. Same binary on both sides.
+`serve` does. Same binary on both sides.
+
+## urfave/cli adapter
+
+The handler above is the same in every urfave-based consumer, and the parts that
+are easy to get wrong — urfave's process-global `OsExiter` and `ErrWriter`,
+`argv[0]`, `cli.ExitCoder` → `clink.ExitError`, panic recovery — are not
+application-specific. `github.com/go-devkit/clink/urfave` (a nested module, so
+urfave/cli stays off clink's dependency list) does all of it:
+
+```go
+return urfave.Serve(ctx, conf, func(s clink.Session) *cli.Command {
+    return rootCommand(s, commands)
+})
+```
+
+`newRoot` runs per session, which is also what keeps the fresh-tree rule below
+satisfied. `Handler` is exported for applications that need to wrap it — routing
+empty args to a main TUI, say.
+
+The same module's `Tree` covers the client side of the split: it turns the local
+`run` command into a [`clink.LocalCommand`](#core-api), so the daemon-starting
+command names itself once.
 
 ## Concurrency
 

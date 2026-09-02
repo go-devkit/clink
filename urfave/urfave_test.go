@@ -7,13 +7,13 @@ import (
 	"testing"
 
 	"github.com/go-devkit/clink"
-	clinkurfave "github.com/go-devkit/clink/urfave"
+	"github.com/go-devkit/clink/urfave"
 	"github.com/urfave/cli/v3"
 )
 
 func TestTreeName(t *testing.T) {
 	cmd := &cli.Command{Name: "run"}
-	if got := clinkurfave.Tree(cmd).Name(); got != "run" {
+	if got := urfave.Tree(cmd).Name(); got != "run" {
 		t.Fatalf("Name() = %q, want %q", got, cmd.Name)
 	}
 }
@@ -29,7 +29,7 @@ func TestTreeRunPassesArgsVerbatim(t *testing.T) {
 		},
 	}
 
-	err := clinkurfave.Tree(cmd).Run(context.Background(), []string{"run", "--addr", ":2222"})
+	err := urfave.Tree(cmd).Run(context.Background(), []string{"run", "--addr", ":2222"})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestTreeRunHelpPrintsHelp(t *testing.T) {
 		},
 	}
 
-	if err := clinkurfave.Tree(cmd).Run(context.Background(), []string{"run", "--help"}); err != nil {
+	if err := urfave.Tree(cmd).Run(context.Background(), []string{"run", "--help"}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if !strings.Contains(out.String(), "start the daemon") {
@@ -71,7 +71,7 @@ func TestTreeRoutesThroughConnect(t *testing.T) {
 	// Nothing is listening on the configured port, so Connect dispatches locally.
 	conf := clink.Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}
 	err := clink.Connect(context.Background(), conf, []string{"run"},
-		clink.WithLocalCommandTree(clinkurfave.Tree(cmd)))
+		clink.WithLocalCommandTree(urfave.Tree(cmd)))
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
