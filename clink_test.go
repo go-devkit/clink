@@ -1470,6 +1470,134 @@ func TestWithLocalFallbackForwardsWhenDaemonUp(t *testing.T) {
 	}
 }
 
+// fakeTree is a hand-written LocalCommand, standing in for the adapter modules.
+type fakeTree struct {
+	name string
+	run  func(context.Context, []string) error
+}
+
+func (f fakeTree) Name() string { return f.name }
+
+func (f fakeTree) Run(ctx context.Context, args []string) error { return f.run(ctx, args) }
+
+func TestWithLocalCommandTreeRoutesOnNameAndPassesArgsVerbatim(t *testing.T) {
+	conf := Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}
+
+	var gotArgs []string
+	tree := fakeTree{name: "run", run: func(_ context.Context, args []string) error {
+		gotArgs = args
+		return nil
+	}}
+
+	err := Connect(context.Background(), conf, []string{"run", "--help"},
+		WithLocalCommandTree(tree))
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if len(gotArgs) != 2 || gotArgs[0] != "run" || gotArgs[1] != "--help" {
+		t.Fatalf("gotArgs = %v, want [run --help] verbatim", gotArgs)
+	}
+}
+
+func TestWithLocalCommandTreeRefusesWhenDaemonUp(t *testing.T) {
+	handler := func(_ context.Context, _ Session, _ []string) error { return nil }
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	tree := fakeTree{name: "run", run: func(_ context.Context, _ []string) error {
+		t.Fatal("tree should not run when daemon is up")
+		return nil
+	}}
+
+	err := Connect(context.Background(), conf, []string{"run"}, WithLocalCommandTree(tree))
+	if err == nil || !strings.Contains(err.Error(), "already listening") {
+		t.Fatalf("expected refusal, got %v", err)
+	}
+}
+
+func TestWithLocalCommandTreeEmptyNameMatchesNoArgs(t *testing.T) {
+	conf := Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}
+
+	called := false
+	tree := fakeTree{name: "", run: func(_ context.Context, args []string) error {
+		called = true
+		if len(args) != 0 {
+			t.Fatalf("args = %v, want empty", args)
+		}
+		return nil
+	}}
+
+	if err := Connect(context.Background(), conf, nil, WithLocalCommandTree(tree)); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if !called {
+		t.Fatal("empty-name tree did not run for no-args invocation")
+	}
+}
+
+func TestWithLocalFallbackTreeForwardsWhenDaemonUp(t *testing.T) {
+	handler := func(_ context.Context, _ Session, _ []string) error { return nil }
+	conf, stop := startServer(t, "pw", nil, handler)
+	defer stop()
+
+	tree := fakeTree{name: "boot", run: func(_ context.Context, _ []string) error {
+		t.Fatal("fallback tree should not run when daemon is up")
+		return nil
+	}}
+
+	if err := Connect(context.Background(), conf, []string{"boot"}, WithLocalFallbackTree(tree)); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+}
+
+func TestWithLocalFallbackTreeRunsWhenDaemonDown(t *testing.T) {
+	conf := Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}
+
+	called := false
+	tree := fakeTree{name: "boot", run: func(_ context.Context, _ []string) error {
+		called = true
+		return nil
+	}}
+
+	if err := Connect(context.Background(), conf, []string{"boot"}, WithLocalFallbackTree(tree)); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if !called {
+		t.Fatal("fallback tree did not run with daemon down")
+	}
+}
+
+func TestLocalCommandTreeWinsOverFallbackForSameName(t *testing.T) {
+	conf := Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}
+
+	local := fakeTree{name: "run", run: func(_ context.Context, _ []string) error { return nil }}
+	fallback := fakeTree{name: "run", run: func(_ context.Context, _ []string) error {
+		t.Fatal("fallback ran although a local command is registered for the same name")
+		return nil
+	}}
+
+	if err := Connect(context.Background(), conf, []string{"run"},
+		WithLocalFallbackTree(fallback), WithLocalCommandTree(local)); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+}
+
+func TestWithLocalTreeNilPanics(t *testing.T) {
+	for name, fn := range map[string]func(LocalCommand) ConnectOption{
+		"WithLocalCommandTree":  WithLocalCommandTree,
+		"WithLocalFallbackTree": WithLocalFallbackTree,
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("expected panic for nil LocalCommand")
+				}
+			}()
+			fn(nil)
+		})
+	}
+}
+
 func TestAutoPTYWithPipedStdin(t *testing.T) {
 	// os.Stdin in `go test` is not a tty. AutoPTY should NOT set pty.
 	var co connectOpts

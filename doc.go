@@ -12,8 +12,9 @@
 //
 // clink also forwards files from the client's filesystem on the daemon's
 // request (see [Session]), local-command dispatch that bypasses the daemon (see
-// [WithLocalCommand] and [WithLocalFallback]), client signals, and terminal
-// resizes.
+// [WithLocalCommand] and [WithLocalFallback], or [WithLocalCommandTree] and
+// [WithLocalFallbackTree] for a command tree that carries its own name), client
+// signals, and terminal resizes.
 //
 // clink assumes the daemon and its clients share one trust domain — typically a
 // loopback-bound daemon serving processes of the same user. It does no rate

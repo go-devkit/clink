@@ -77,7 +77,33 @@ clink.Connect(ctx, conf, args,
     clink.WithLocalCommand("run", runLocally),
     clink.WithLocalFallback("", runLocally),
 )
+
+// A command tree that already knows its own name can register itself, so the
+// name is not repeated as a routing key. LocalCommand is two methods and stays
+// framework-free; the adapters live in their own modules.
+type LocalCommand interface {
+    Name() string                                  // routing key, compared to args[0]
+    Run(ctx context.Context, args []string) error  // args verbatim, args[0] included
+}
+
+clink.Connect(ctx, conf, args,
+    clink.AutoPTY(),
+    clink.WithLocalCommandTree(clinkurfave.Tree(runCommand())),
+    clink.WithLocalFallbackTree(clinkcobra.Tree(rootCommand())),
+)
 ```
+
+Adapters (separate modules — plain clink pulls in neither framework):
+
+```bash
+go get github.com/go-devkit/clink/urfave  # Tree(*cli.Command)
+go get github.com/go-devkit/clink/cobra   # Tree(*cobra.Command)
+```
+
+The tree is built before `Connect` decides whether it is selected — `Name()`
+can't be read otherwise — so its constructor must stay cheap. Assemble the
+command tree there, and keep DB handles, secrets, and other server-only wiring
+inside the action, which only runs when the command actually matches.
 
 ## Usage
 
@@ -95,6 +121,7 @@ import (
     "syscall"
 
     "github.com/go-devkit/clink"
+    clinkurfave "github.com/go-devkit/clink/urfave"
     "github.com/urfave/cli/v3"
 )
 
@@ -106,20 +133,32 @@ func main() {
 
     err := clink.Connect(ctx, conf, os.Args[1:],
         clink.AutoPTY(),
-        clink.WithLocalCommand("run", runLocally),
+        // The tree carries its own name ("run"), so nothing is repeated and
+        // `myapp run --help` reaches the command's help.
+        clink.WithLocalCommandTree(clinkurfave.Tree(runCommand())),
         // Optional: `myapp` (no subcommand) starts the daemon if none is up,
-        // else forwards and opens the main TUI.
-        clink.WithLocalFallback("", runLocally),
+        // else forwards and opens the main TUI. The no-args key gets no argv to
+        // parse, so it takes the plain func form.
+        clink.WithLocalFallback("", func(fctx context.Context, _ []string) error {
+            return serve(fctx)
+        }),
     )
     if err != nil {
         os.Exit(1)
     }
 }
 
-// runLocally is invoked instead of Connect when args[0] == "run".
-// This is where wire/DI builds the full application and hands the CLI
-// tree to clink.Listen.
-func runLocally(ctx context.Context, _ []string) error {
+// runCommand is the local command tree. Building it is a struct literal —
+// wire/DI runs inside the action, only when `run` is actually selected.
+func runCommand() *cli.Command {
+    return &cli.Command{
+        Name:   "run",
+        Usage:  "start the daemon",
+        Action: func(ctx context.Context, _ *cli.Command) error { return serve(ctx) },
+    }
+}
+
+func serve(ctx context.Context) error {
     // e.g. wire.BuildApp() — full DI happens ONLY here, on the server env.
     app, cleanup, err := buildApp(ctx)
     if err != nil {
