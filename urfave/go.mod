@@ -2,10 +2,8 @@ module github.com/go-devkit/clink/urfave
 
 go 1.25.9
 
-replace github.com/go-devkit/clink => ..
-
 require (
-	github.com/go-devkit/clink v0.0.0-00010101000000-000000000000
+	github.com/go-devkit/clink v0.1.0
 	github.com/urfave/cli/v3 v3.11.0
 	golang.org/x/crypto v0.50.0
 )
