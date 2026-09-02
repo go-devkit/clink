@@ -64,32 +64,30 @@ clink.Listen(ctx, conf, handler)
 // Client side. Connect forwards args to the daemon.
 // AutoPTY allocates a PTY iff os.Stdin is a terminal (mirrors ssh's default),
 // so the same call handles TUI subcommands and pipe-friendly plain commands.
-// WithLocalCommand names a subcommand that must run locally instead of being
-// forwarded (typically the one that starts the daemon). Connect refuses to
-// invoke a local command when a daemon is already reachable, preventing a
-// double-run.
-// WithLocalFallback names a command that runs locally ONLY when no daemon is
-// reachable; if the daemon is up, Connect forwards as usual. Use name "" to
-// match the no-args invocation — handy for an entry that opens the dashboard
-// when the daemon runs and starts the daemon otherwise.
-clink.Connect(ctx, conf, args,
-    clink.AutoPTY(),
-    clink.WithLocalCommand("run", runLocally),
-    clink.WithLocalFallback("", runLocally),
-)
-
-// A command tree that already knows its own name can register itself, so the
-// name is not repeated as a routing key. LocalCommand is two methods and stays
-// framework-free; the adapters live in their own modules.
+// A local command registers itself: it carries the name clink routes on, so
+// nothing is repeated. LocalCommand is two methods and stays framework-free;
+// the adapters live in their own modules.
 type LocalCommand interface {
     Name() string                                  // routing key, compared to args[0]
     Run(ctx context.Context, args []string) error  // args verbatim, args[0] included
 }
 
+// LocalFunc adapts a plain function, for local commands that are not a command
+// tree — chiefly the no-args entry, which has no argv to parse.
+func LocalFunc(name string, fn func(ctx context.Context, args []string) error) LocalCommand
+
+// WithLocalCommand registers a command that must run locally instead of being
+// forwarded (typically the one that starts the daemon). Connect refuses to
+// invoke a local command when a daemon is already reachable, preventing a
+// double-run.
+// WithLocalFallback registers a command that runs locally ONLY when no daemon is
+// reachable; if the daemon is up, Connect forwards as usual. Name "" matches the
+// no-args invocation — handy for an entry that opens the dashboard when the
+// daemon runs and starts the daemon otherwise.
 clink.Connect(ctx, conf, args,
     clink.AutoPTY(),
-    clink.WithLocalCommandTree(urfave.Tree(runCommand())),
-    clink.WithLocalFallbackTree(cobra.Tree(rootCommand())),
+    clink.WithLocalCommand(urfave.Tree(runCommand())),
+    clink.WithLocalFallback(clink.LocalFunc("", startDaemon)),
 )
 ```
 
@@ -100,7 +98,7 @@ go get github.com/go-devkit/clink/urfave  # Tree(*cli.Command), plus Serve/Handl
 go get github.com/go-devkit/clink/cobra   # Tree(*cobra.Command)
 ```
 
-The tree is built before `Connect` decides whether it is selected — `Name()`
+The command is built before `Connect` decides whether it is selected — `Name()`
 can't be read otherwise — so its constructor must stay cheap. Assemble the
 command tree there, and keep DB handles, secrets, and other server-only wiring
 inside the action, which only runs when the command actually matches.
@@ -135,13 +133,13 @@ func main() {
         clink.AutoPTY(),
         // The tree carries its own name ("run"), so nothing is repeated and
         // `myapp run --help` reaches the command's help.
-        clink.WithLocalCommandTree(urfave.Tree(runCommand())),
+        clink.WithLocalCommand(urfave.Tree(runCommand())),
         // Optional: `myapp` (no subcommand) starts the daemon if none is up,
         // else forwards and opens the main TUI. The no-args key gets no argv to
-        // parse, so it takes the plain func form.
-        clink.WithLocalFallback("", func(fctx context.Context, _ []string) error {
+        // parse, so it takes the LocalFunc form.
+        clink.WithLocalFallback(clink.LocalFunc("", func(fctx context.Context, _ []string) error {
             return serve(fctx)
-        }),
+        })),
     )
     if err != nil {
         os.Exit(1)

@@ -1395,7 +1395,7 @@ func TestWithLocalCommandDispatchesLocally(t *testing.T) {
 		return nil
 	}
 	err := Connect(context.Background(), conf, []string{"run", "--flag"},
-		WithLocalCommand("run", fn))
+		WithLocalCommand(LocalFunc("run", fn)))
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
@@ -1413,10 +1413,10 @@ func TestWithLocalCommandRefusesWhenDaemonUp(t *testing.T) {
 	defer stop()
 
 	err := Connect(context.Background(), conf, []string{"run"},
-		WithLocalCommand("run", func(_ context.Context, _ []string) error {
+		WithLocalCommand(LocalFunc("run", func(_ context.Context, _ []string) error {
 			t.Fatal("local fn should not run when daemon is up")
 			return nil
-		}))
+		})))
 	if err == nil || !strings.Contains(err.Error(), "already listening") {
 		t.Fatalf("expected refusal, got %v", err)
 	}
@@ -1427,10 +1427,10 @@ func TestWithLocalCommandNonMatchForwards(t *testing.T) {
 	// an empty port). We only care that the local fn is NOT called.
 	conf := Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}
 	err := Connect(context.Background(), conf, []string{"other"},
-		WithLocalCommand("run", func(_ context.Context, _ []string) error {
+		WithLocalCommand(LocalFunc("run", func(_ context.Context, _ []string) error {
 			t.Fatal("local fn should not run for non-matching args[0]")
 			return nil
-		}))
+		})))
 	if err == nil {
 		t.Fatal("expected dial error")
 	}
@@ -1440,10 +1440,10 @@ func TestWithLocalFallbackRunsLocalWhenDaemonDown(t *testing.T) {
 	conf := Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}
 	called := false
 	err := Connect(context.Background(), conf, nil,
-		WithLocalFallback("", func(_ context.Context, _ []string) error {
+		WithLocalFallback(LocalFunc("", func(_ context.Context, _ []string) error {
 			called = true
 			return nil
-		}))
+		})))
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
@@ -1461,10 +1461,10 @@ func TestWithLocalFallbackForwardsWhenDaemonUp(t *testing.T) {
 	defer stop()
 
 	err := Connect(context.Background(), conf, []string{"anything"},
-		WithLocalFallback("anything", func(_ context.Context, _ []string) error {
+		WithLocalFallback(LocalFunc("anything", func(_ context.Context, _ []string) error {
 			t.Fatal("fallback fn should not run when daemon is up")
 			return nil
-		}))
+		})))
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
@@ -1480,7 +1480,7 @@ func (f fakeTree) Name() string { return f.name }
 
 func (f fakeTree) Run(ctx context.Context, args []string) error { return f.run(ctx, args) }
 
-func TestWithLocalCommandTreeRoutesOnNameAndPassesArgsVerbatim(t *testing.T) {
+func TestLocalCommandTreeRoutesOnNameAndPassesArgsVerbatim(t *testing.T) {
 	conf := Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}
 
 	var gotArgs []string
@@ -1490,7 +1490,7 @@ func TestWithLocalCommandTreeRoutesOnNameAndPassesArgsVerbatim(t *testing.T) {
 	}}
 
 	err := Connect(context.Background(), conf, []string{"run", "--help"},
-		WithLocalCommandTree(tree))
+		WithLocalCommand(tree))
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
@@ -1499,23 +1499,7 @@ func TestWithLocalCommandTreeRoutesOnNameAndPassesArgsVerbatim(t *testing.T) {
 	}
 }
 
-func TestWithLocalCommandTreeRefusesWhenDaemonUp(t *testing.T) {
-	handler := func(_ context.Context, _ Session, _ []string) error { return nil }
-	conf, stop := startServer(t, "pw", nil, handler)
-	defer stop()
-
-	tree := fakeTree{name: "run", run: func(_ context.Context, _ []string) error {
-		t.Fatal("tree should not run when daemon is up")
-		return nil
-	}}
-
-	err := Connect(context.Background(), conf, []string{"run"}, WithLocalCommandTree(tree))
-	if err == nil || !strings.Contains(err.Error(), "already listening") {
-		t.Fatalf("expected refusal, got %v", err)
-	}
-}
-
-func TestWithLocalCommandTreeEmptyNameMatchesNoArgs(t *testing.T) {
+func TestLocalCommandTreeEmptyNameMatchesNoArgs(t *testing.T) {
 	conf := Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}
 
 	called := false
@@ -1527,43 +1511,11 @@ func TestWithLocalCommandTreeEmptyNameMatchesNoArgs(t *testing.T) {
 		return nil
 	}}
 
-	if err := Connect(context.Background(), conf, nil, WithLocalCommandTree(tree)); err != nil {
+	if err := Connect(context.Background(), conf, nil, WithLocalCommand(tree)); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	if !called {
 		t.Fatal("empty-name tree did not run for no-args invocation")
-	}
-}
-
-func TestWithLocalFallbackTreeForwardsWhenDaemonUp(t *testing.T) {
-	handler := func(_ context.Context, _ Session, _ []string) error { return nil }
-	conf, stop := startServer(t, "pw", nil, handler)
-	defer stop()
-
-	tree := fakeTree{name: "boot", run: func(_ context.Context, _ []string) error {
-		t.Fatal("fallback tree should not run when daemon is up")
-		return nil
-	}}
-
-	if err := Connect(context.Background(), conf, []string{"boot"}, WithLocalFallbackTree(tree)); err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-}
-
-func TestWithLocalFallbackTreeRunsWhenDaemonDown(t *testing.T) {
-	conf := Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}
-
-	called := false
-	tree := fakeTree{name: "boot", run: func(_ context.Context, _ []string) error {
-		called = true
-		return nil
-	}}
-
-	if err := Connect(context.Background(), conf, []string{"boot"}, WithLocalFallbackTree(tree)); err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	if !called {
-		t.Fatal("fallback tree did not run with daemon down")
 	}
 }
 
@@ -1577,15 +1529,15 @@ func TestLocalCommandTreeWinsOverFallbackForSameName(t *testing.T) {
 	}}
 
 	if err := Connect(context.Background(), conf, []string{"run"},
-		WithLocalFallbackTree(fallback), WithLocalCommandTree(local)); err != nil {
+		WithLocalFallback(fallback), WithLocalCommand(local)); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 }
 
-func TestWithLocalTreeNilPanics(t *testing.T) {
+func TestWithLocalNilPanics(t *testing.T) {
 	for name, fn := range map[string]func(LocalCommand) ConnectOption{
-		"WithLocalCommandTree":  WithLocalCommandTree,
-		"WithLocalFallbackTree": WithLocalFallbackTree,
+		"WithLocalCommand":  WithLocalCommand,
+		"WithLocalFallback": WithLocalFallback,
 	} {
 		t.Run(name, func(t *testing.T) {
 			defer func() {
@@ -1804,13 +1756,13 @@ func TestWithLocalFallbackWithNamedKey(t *testing.T) {
 	conf := Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}
 	called := false
 	err := Connect(context.Background(), conf, []string{"boot", "--flag"},
-		WithLocalFallback("boot", func(_ context.Context, args []string) error {
+		WithLocalFallback(LocalFunc("boot", func(_ context.Context, args []string) error {
 			called = true
 			if len(args) != 2 || args[0] != "boot" || args[1] != "--flag" {
 				t.Fatalf("args = %v", args)
 			}
 			return nil
-		}))
+		})))
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}

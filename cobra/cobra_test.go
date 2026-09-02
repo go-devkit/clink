@@ -89,7 +89,7 @@ func TestTreeRoutesThroughConnect(t *testing.T) {
 	// Nothing is listening on the configured port, so Connect dispatches locally.
 	conf := clink.Config{Host: "127.0.0.1", Port: freePort(t), Password: "pw"}
 	err := clink.Connect(context.Background(), conf, []string{"run"},
-		clink.WithLocalCommandTree(clinkcobra.Tree(cmd)))
+		clink.WithLocalCommand(clinkcobra.Tree(cmd)))
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}

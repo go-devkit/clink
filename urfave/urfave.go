@@ -13,8 +13,8 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-// Tree wraps cmd so it can be passed to [clink.WithLocalCommandTree] or
-// [clink.WithLocalFallbackTree]. The routing key is cmd.Name.
+// Tree wraps cmd so it can be passed to [clink.WithLocalCommand] or
+// [clink.WithLocalFallback]. The routing key is cmd.Name.
 //
 // cmd is built before Connect decides whether the command is selected, so its
 // constructor must stay cheap — assemble the tree, but do the server-only wiring

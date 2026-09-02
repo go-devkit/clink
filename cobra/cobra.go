@@ -13,8 +13,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Tree wraps cmd so it can be passed to [clink.WithLocalCommandTree] or
-// [clink.WithLocalFallbackTree]. The routing key is cmd.Name(), i.e. the first
+// Tree wraps cmd so it can be passed to [clink.WithLocalCommand] or
+// [clink.WithLocalFallback]. The routing key is cmd.Name(), i.e. the first
 // word of cmd.Use.
 //
 // cmd is built before Connect decides whether the command is selected, so its

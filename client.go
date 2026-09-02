@@ -76,85 +76,89 @@ func AutoPTY() ConnectOption {
 	}
 }
 
-// WithLocalCommand registers a command that must not be forwarded to the
-// daemon. If args[0] matches name (or name == "" and args is empty), Connect
-// calls fn instead of dialing. Connect returns an error if a daemon is already
-// reachable, to prevent a double-run — use WithLocalFallback for
-// forward-if-up / run-if-down semantics.
-func WithLocalCommand(name string, fn func(context.Context, []string) error) ConnectOption {
-	return func(o *connectOpts) {
-		if o.locals == nil {
-			o.locals = make(map[string]func(context.Context, []string) error)
-		}
-
-		o.locals[name] = fn
-	}
-}
-
-// WithLocalFallback registers a command that runs locally only when no daemon
-// is reachable. If args[0] matches name (or name == "" and args is empty) and
-// the daemon is up, Connect forwards as usual; if the daemon is down, fn runs
-// instead. Typical use: no-args entry that opens the TUI when the daemon is
-// running and starts the daemon otherwise.
-func WithLocalFallback(name string, fn func(context.Context, []string) error) ConnectOption {
-	return func(o *connectOpts) {
-		if o.fallbacks == nil {
-			o.fallbacks = make(map[string]func(context.Context, []string) error)
-		}
-
-		o.fallbacks[name] = fn
-	}
-}
-
-// LocalCommand is a command tree that knows its own invocation name and can run
+// LocalCommand is a command that knows its own invocation name and can run
 // itself. It exists so a consumer registers a command once, instead of naming it
-// both as clink's routing key and inside the tree.
+// both as clink's routing key and inside the command tree.
 //
 // Implement it with one of the adapter modules
-// (github.com/go-devkit/clink/urfave, github.com/go-devkit/clink/cobra) or by
-// hand — it is deliberately two methods, so clink stays free of any CLI
-// framework dependency.
+// (github.com/go-devkit/clink/urfave, github.com/go-devkit/clink/cobra), with
+// [LocalFunc] for a plain function, or by hand — it is deliberately two methods,
+// so clink stays free of any CLI framework dependency.
 type LocalCommand interface {
 	// Name is the routing key: clink compares it against args[0] before any
 	// connection is attempted. An empty name matches the no-args invocation.
 	Name() string
 
-	// Run executes the tree. args is the full argument slice as received by
-	// Connect, args[0] included. Pass it to the framework verbatim: urfave and
+	// Run executes the command. args is the full argument slice as received by
+	// Connect, args[0] included. Pass it to a command tree verbatim: urfave and
 	// cobra both expect argv[0] to be the program/command name, so prepending
 	// the name again duplicates it and breaks flags such as --help.
 	Run(ctx context.Context, args []string) error
 }
 
-// WithLocalCommandTree is [WithLocalCommand] for a command tree that carries its
-// own name. Registering the same name through both is a programming error; the
-// last option wins.
+// LocalFunc adapts a plain function to [LocalCommand], for a local command that
+// is not a framework command tree — typically the no-args entry (name ""), which
+// has no argv to parse.
+func LocalFunc(name string, fn func(ctx context.Context, args []string) error) LocalCommand {
+	return localFunc{name: name, fn: fn}
+}
+
+type localFunc struct {
+	name string
+	fn   func(context.Context, []string) error
+}
+
+func (l localFunc) Name() string { return l.name }
+
+func (l localFunc) Run(ctx context.Context, args []string) error { return l.fn(ctx, args) }
+
+// WithLocalCommand registers a command that must not be forwarded to the
+// daemon. If args[0] matches cmd.Name (or the name is "" and args is empty),
+// Connect runs cmd instead of dialing. Connect returns an error if a daemon is
+// already reachable, to prevent a double-run — use [WithLocalFallback] for
+// forward-if-up / run-if-down semantics.
 //
 // cmd is built by the caller before Connect decides whether it is selected, so
 // its constructor must stay cheap — no database handles, no secrets, no server-
 // only wiring. That work belongs inside Run, which only executes when the
 // command actually matches.
 //
+// Registering the same name twice is a programming error; the last option wins.
 // Panics if cmd is nil.
-func WithLocalCommandTree(cmd LocalCommand) ConnectOption {
+func WithLocalCommand(cmd LocalCommand) ConnectOption {
 	if cmd == nil {
-		panic("clink: WithLocalCommandTree called with nil LocalCommand")
+		panic("clink: WithLocalCommand called with nil LocalCommand")
 	}
 
-	return WithLocalCommand(cmd.Name(), cmd.Run)
+	return func(o *connectOpts) {
+		if o.locals == nil {
+			o.locals = make(map[string]func(context.Context, []string) error)
+		}
+
+		o.locals[cmd.Name()] = cmd.Run
+	}
 }
 
-// WithLocalFallbackTree is [WithLocalFallback] for a command tree that carries
-// its own name. The construction constraint of [WithLocalCommandTree] applies
-// unchanged.
+// WithLocalFallback registers a command that runs locally only when no daemon is
+// reachable. If args[0] matches cmd.Name (or the name is "" and args is empty)
+// and the daemon is up, Connect forwards as usual; if the daemon is down, cmd
+// runs instead. Typical use: no-args entry that opens the TUI when the daemon is
+// running and starts the daemon otherwise.
 //
+// The construction constraint of [WithLocalCommand] applies unchanged.
 // Panics if cmd is nil.
-func WithLocalFallbackTree(cmd LocalCommand) ConnectOption {
+func WithLocalFallback(cmd LocalCommand) ConnectOption {
 	if cmd == nil {
-		panic("clink: WithLocalFallbackTree called with nil LocalCommand")
+		panic("clink: WithLocalFallback called with nil LocalCommand")
 	}
 
-	return WithLocalFallback(cmd.Name(), cmd.Run)
+	return func(o *connectOpts) {
+		if o.fallbacks == nil {
+			o.fallbacks = make(map[string]func(context.Context, []string) error)
+		}
+
+		o.fallbacks[cmd.Name()] = cmd.Run
+	}
 }
 
 // Connect sends args to the running daemon.
